@@ -4,7 +4,7 @@ use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
-use dirs::home_dir;
+use dirs::{data_dir, home_dir};
 use lib::todo::{
     extract_naked_filename, lines_from_file, parse_lines, FileList, MAIN_DIR, STARTER_FILE,
     STARTER_FILE_CONTENT,
@@ -46,10 +46,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         PathBuf::from(opt.main_path)
     } else {
         let mut path: PathBuf = PathBuf::new();
-        match home_dir() {
+        match data_dir() {
             Some(dir) => path.push(dir.as_path()),
-            _ => path.push(Path::new("/root")),
-        }
+            _ => 
+            {
+                match home_dir() {
+
+            Some(dir) => path.push(dir.as_path()),
+            _ =>                 path.push(Path::new("/root")),
+
+                }
+        
+            }}
         path.push(Path::new(&MAIN_DIR));
         path
     };

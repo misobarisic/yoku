@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-pub const MAIN_DIR: &str = ".todo";
+pub const MAIN_DIR: &str = "yoku";
 pub const STARTER_FILE: &str = "tutorial.md";
 pub const STARTER_FILE_CONTENT: &str =
     "# Start\n\nThis is a simple todo list\n\n- [ ] you may change note state with Enter, Spacebar, x, +, - or delete it with r\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\
