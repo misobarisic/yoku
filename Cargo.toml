@@ -1,0 +1,12 @@
+[package]
+name = "yoku"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dirs = "4.0.0"
+crossterm = "0.23.0"
+tui = "0.17.0"
+structopt = "0.3"
+regex = "1"
+lib = {path= "src/lib" }
