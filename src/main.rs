@@ -48,16 +48,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut path: PathBuf = PathBuf::new();
         match data_dir() {
             Some(dir) => path.push(dir.as_path()),
-            _ => 
-            {
-                match home_dir() {
-
-            Some(dir) => path.push(dir.as_path()),
-            _ =>                 path.push(Path::new("/root")),
-
-                }
-        
-            }}
+            _ => match home_dir() {
+                Some(dir) => path.push(dir.as_path()),
+                _ => path.push(Path::new("/root")),
+            },
+        }
         path.push(Path::new(&MAIN_DIR));
         path
     };
