@@ -11,7 +11,7 @@ use std::{
 pub const MAIN_DIR: &str = ".todo";
 pub const STARTER_FILE: &str = "tutorial.md";
 pub const STARTER_FILE_CONTENT: &str =
-    "# Start\n\nThis is a simple todo list\n\n- [ ] you may change note state with Enter, Spacebar, x, +, - or delete it with e\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\
+    "# Start\n\nThis is a simple todo list\n\n- [ ] you may change note state with Enter, Spacebar, x, +, - or delete it with r\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\
     \n# Create\n\nThis list contains shortcuts related to creating new files\n\n- [ ] u = create new file (press enter to confirm)\n- [ ] i = create new list (press enter to confirm)\n- [ ] o = create new note (press enter to confirm)\n\
     \n# Modify\n\nThis list contains shortcuts related to modifying data\n\n- [ ] e = edit current file/note/list\n- [ ] Ctrl + e = edit current list's description \n- [ ] r = remove current file/note/list\n- [ ] use the Escape key to unselect the current note\n\
     \n# Exiting\n\n- [ ] q = exit and save\n- [ ] Ctrl + q  = exit and discard changes\n- [ ] Ctrl + C  = exit and discard changes\n\n";
