@@ -14,6 +14,9 @@ use lib::ui::run_app;
 use lib::util::calculate_hash;
 use regex::Regex;
 use std::collections::HashMap;
+use std::process::exit;
+use std::thread::sleep;
+use std::time::Duration;
 use std::{
     error::Error,
     fs::read_dir,
@@ -26,16 +29,19 @@ use structopt::StructOpt;
 use tui::{backend::CrosstermBackend, Terminal};
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "todo", about = "TUI Markdown Todo")]
+#[structopt(name = "yoku", about = "TUI Markdown Todo")]
 struct Opt {
     #[structopt(
         short = "p",
         long = "path",
-        help = "Specify the todo folder (defaults to ~/.todo)",
+        help = "Specify the data path",
         default_value = "",
         hide_default_value = true
     )]
     main_path: String,
+
+    #[structopt(short = "d", long = "data-path", help = "Check the default data path")]
+    check_path: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -57,14 +63,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         path
     };
 
+    if opt.check_path {
+        println!(
+            "Current default data path is \"{}\"",
+            main_path.to_str().unwrap()
+        );
+        exit(0);
+    }
+
     // Create main folder if it doesn't exist
     if !main_path.exists() && !main_path.is_dir() {
+        println!(
+            "Creating yoku data directory: {}",
+            main_path.to_str().unwrap()
+        );
         create_dir_all(&main_path).unwrap_or_else(|_| {
             panic!(
                 "Error creating starting dir: {}",
                 &main_path.to_str().unwrap()
             )
         });
+        sleep(Duration::from_secs(3));
     }
 
     let mut path_entries = read_dir(&main_path)?

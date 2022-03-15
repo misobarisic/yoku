@@ -181,22 +181,6 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         );
     }
 
-    // let list_tabs: Vec<ListItem> = app.lists.get(app.file_index).unwrap().titles
-    //     .iter()
-    //     .enumerate()
-    //     .map(|(i, note)| {
-    //         let lines = if i == app.note_index && app.cursor_vertical == 1 {
-    //             vec![Spans::from("dsa")]
-    //         } else {
-    //             vec![Spans::from("dsa")]
-    //         };
-    //         ListItem::new(lines).style(Style::default().fg(Color::White))
-    //     })
-    //     .collect();
-    //
-    // let list_tabs = List::new(list_tabs).style(Style::default());
-    // f.render_stateful_widget(list_tabs, chunks[1], &mut app.lists_state);
-
     f.render_widget(list_tabs, chunks[1]);
 
     let mut file_tabs = Tabs::new(file_tab_items)
@@ -213,7 +197,6 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     }
 
     f.render_widget(file_tabs, chunks[0]);
-    // f.render_stateful_widget(file_tabs, chunks[0],  &mut app.files_state);
 
     // NOTES
     let items = app
@@ -263,7 +246,7 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         let input = Paragraph::new(app.input.as_ref())
             .style(match app.mode {
                 EditorMode::Nothing => Style::default(),
-                _ => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::White),
             })
             .block(
                 Block::default()
@@ -277,7 +260,8 @@ pub fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                         EditorMode::ChangeListDescription => "Change List Description",
                         EditorMode::ChangeNoteContent => "Change Note Content",
                         _ => "",
-                    }),
+                    })
+                    .style(Style::default().fg(Color::LightCyan)),
             );
         f.render_widget(input, chunks[3]);
     }

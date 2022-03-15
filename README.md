@@ -37,5 +37,11 @@ Please make sure to update tests as appropriate.
 
 ---
 
+## Data
+
+Default data location depends on the platform you're using. You can check it by passing the `-d/--data-path` flag such as `yoku -d`.
+
+---
+
 ## License
 This project is licensed under [GPLv3](https://choosealicense.com/licenses/gpl-3.0/).
