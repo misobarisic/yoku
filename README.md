@@ -2,6 +2,9 @@
 
 [![Continuous Integration](https://github.com/misobarisic/yoku/actions/workflows/ci.yml/badge.svg)](https://github.com/misobarisic/yoku/actions/workflows/ci.yml)
 [![Continuous Deployment](https://github.com/misobarisic/yoku/actions/workflows/cd.yml/badge.svg)](https://github.com/misobarisic/yoku/actions/workflows/cd.yml)
+[![License](https://img.shields.io/github/license/misobarisic/yoku?color=blue)](./COPYING.md)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/misobarisic/yoku)](https://github.com/misobarisic/yoku/releases/latest)
+![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/misobarisic/yoku)
 
 yoku is a markdown based todo app allowing for easy portability
 
