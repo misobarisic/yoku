@@ -93,12 +93,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if path_entries.is_empty() {
         let mut starter_path = main_path.clone();
-        starter_path.push(&STARTER_FILE);
+        starter_path.push(STARTER_FILE);
         let mut starter_file = File::create(&starter_path)
-            .unwrap_or_else(|_| panic!("Could not create file {:?}", starter_path));
+            .unwrap_or_else(|_| panic!("Could not create file {starter_path:?}"));
         starter_file
             .write_all(STARTER_FILE_CONTENT.as_ref())
-            .unwrap_or_else(|_| panic!("Could not write to file {:?}", starter_path));
+            .unwrap_or_else(|_| panic!("Could not write to file {starter_path:?}"));
 
         // Redefine path_entries
         path_entries = read_dir(&main_path)?
@@ -156,7 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     terminal.show_cursor()?;
 
     if let Err(err) = res {
-        println!("{:?}", err)
+        println!("{err:?}")
     }
 
     Ok(())
