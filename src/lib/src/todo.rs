@@ -44,8 +44,8 @@ impl FileList {
         // Add trailing newline
         write_string.push('\n');
 
-        let mut file =
-            File::create(path).unwrap_or_else(|_| panic!("Could not create file {:?}", path));
+        let mut file = File::open(&path).unwrap_or_else(|_|File::create(&path).unwrap_or_else(|_| panic!("Could not create file {:?}", path)) );
+            
         file.write_all(write_string.as_bytes())
             .unwrap_or_else(|_| panic!("Could not write to file {:?}", path));
     }
