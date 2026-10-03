@@ -60,7 +60,7 @@ where
             match key.code {
                 KeyCode::Char('o') => {
                     app.overwrite_conflict();
-                    match app.save() {
+                    match app.retry_save() {
                         Ok(true) => return Ok(()),
                         Ok(false) => {}
                         Err(error) => {
@@ -88,6 +88,16 @@ where
             continue;
         }
 
+        if app.mode == EditorMode::Nothing
+            && key.code == KeyCode::Char('s')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            if let Err(error) = app.request_save(false) {
+                app.status_message = Some(format!("Save failed: {error}"));
+            }
+            continue;
+        }
+
         match app.mode {
             EditorMode::Nothing => match key.code {
                 KeyCode::Char('/') => app.begin_search(),
@@ -112,7 +122,7 @@ where
                     return Ok(())
                 }
                 KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {}
-                KeyCode::Char('q') => match app.save() {
+                KeyCode::Char('q') => match app.request_save(true) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
                     Err(error) => app.status_message = Some(format!("Save failed: {error}")),
@@ -259,8 +269,20 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     }
     frame.render_widget(list_tabs, chunks[1]);
 
+    let file_labels = app
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            if app.file_is_dirty(index) {
+                format!("{name} *")
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
     let (file_items, selected_file) = make_visible_tab_items(
-        app.files,
+        &file_labels,
         app.file_index,
         chunks[0].width.saturating_sub(2) as usize,
     );
@@ -399,7 +421,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
             })
         })
         .or_else(|| app.status_message.clone())
-        .unwrap_or_else(|| "?: help  /: search  Ctrl+Z: undo  q: save and quit".into());
+        .unwrap_or_else(|| {
+            "?: help  /: search  Ctrl+S: save  Ctrl+Z: undo  q: save and quit".into()
+        });
     let status = Paragraph::new(message).style(
         Style::default()
             .fg(Color::Yellow)
@@ -492,7 +516,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes the last deletion until save or conflict reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes the last deletion until save or conflict reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(help)

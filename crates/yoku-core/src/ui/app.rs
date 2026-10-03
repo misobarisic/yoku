@@ -90,6 +90,7 @@ pub struct App<'a> {
     pub confirm_discard: bool,
     pub show_help: bool,
     pub search_query: String,
+    pub quit_after_save: bool,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
@@ -132,6 +133,7 @@ impl<'a> App<'a> {
             confirm_discard: false,
             show_help: false,
             search_query: String::new(),
+            quit_after_save: false,
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
@@ -401,6 +403,30 @@ impl<'a> App<'a> {
         Ok(true)
     }
 
+    pub fn file_is_dirty(&self, index: usize) -> bool {
+        self.paths
+            .get(index)
+            .zip(self.lists.get(index))
+            .is_some_and(|(path, list)| {
+                self.hashes.get(path).copied() != Some(calculate_hash(list))
+            })
+    }
+
+    /// Keep the intent through a conflict retry, so Ctrl+S never closes the app.
+    pub fn request_save(&mut self, quit: bool) -> io::Result<bool> {
+        self.quit_after_save = quit;
+        self.retry_save()
+    }
+
+    pub fn retry_save(&mut self) -> io::Result<bool> {
+        if self.save()? {
+            self.status_message = Some("Saved".into());
+            Ok(self.quit_after_save)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn overwrite_conflict(&mut self) {
         if let Some(conflict) = self.save_conflict.take() {
             self.overwrite_paths.insert(conflict.path);
@@ -499,6 +525,7 @@ impl<'a> App<'a> {
 
     pub fn cancel_conflict(&mut self) {
         self.save_conflict = None;
+        self.quit_after_save = false;
         self.status_message =
             Some("Save canceled; your in-memory edits are still available".into());
     }
@@ -1118,6 +1145,34 @@ mod tests {
             disk_hashes,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn save_without_quitting_preserves_intent_through_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let target = paths[0].clone();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.lists[0].notes[0][0].content = "local edit".into();
+        assert!(app.file_is_dirty(0));
+        fs::write(&target, "# Work\n- [ ] external edit\n").unwrap();
+        assert!(!app.request_save(false).unwrap());
+        assert!(app.save_conflict.is_some());
+        app.overwrite_conflict();
+        assert!(!app.retry_save().unwrap());
+        assert!(!app.file_is_dirty(0));
+        assert_eq!(app.status_message.as_deref(), Some("Saved"));
+        assert!(fs::read_to_string(&target).unwrap().contains("local edit"));
+        assert!(app.request_save(true).unwrap());
     }
 
     #[test]

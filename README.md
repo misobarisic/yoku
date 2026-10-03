@@ -55,7 +55,7 @@ The default data directory depends on your platform. Print it with `yoku --data-
 - Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` restores the last deletion until the next successful save or a conflict reload.
 - Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
 - Press `?` or `F1` for the in-app help.
-- Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
+- Press `Ctrl+S` to save and keep working; changed files have a `*` beside their name. Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
 - In an editor, use Left/Right, Home/End, Backspace, and Delete to move and edit text. Cursor movement treats accented letters and emoji as whole graphemes.
 
 ---
