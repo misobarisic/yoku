@@ -8,11 +8,7 @@ use std::fs::remove_file;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const EMPTY_LIST: &FileList = &FileList {
-    titles: vec![],
-    descriptions: vec![],
-    notes: vec![],
-};
+pub const EMPTY_LIST: &FileList = &FileList::empty_const();
 pub const EMPTY_NOTE_VEC: &Vec<Note> = &vec![];
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -325,14 +321,8 @@ impl<'a> App<'a> {
                 }
             }
             2 => {
-                if let Some(notes) = self
-                    .lists
-                    .get_mut(self.file_index)
-                    .and_then(|list| list.notes.get_mut(self.list_index))
-                {
-                    if self.note_index < notes.len() {
-                        notes.remove(self.note_index);
-                    }
+                if let Some(list) = self.lists.get_mut(self.file_index) {
+                    list.remove_note(self.list_index, self.note_index);
                 }
             }
             _ => {}
@@ -367,14 +357,14 @@ impl<'a> App<'a> {
                         self.to_remove.retain(|removed| removed != &path);
                         self.files.push(self.input.clone());
                         self.paths.push(path);
-                        self.lists.push(FileList {
-                            titles: vec![STARTER_FILE_TITLE.to_owned()],
-                            descriptions: vec![STARTER_FILE_DESCRIPTION.to_owned()],
-                            notes: vec![vec![Note {
+                        self.lists.push(FileList::from_parts(
+                            vec![STARTER_FILE_TITLE.to_owned()],
+                            vec![STARTER_FILE_DESCRIPTION.to_owned()],
+                            vec![vec![Note {
                                 content: STARTER_FILE_NOTE.to_owned(),
                                 state: NoteEnum::Open,
                             }]],
-                        });
+                        ));
                         self.file_index = self.files.len() - 1;
                         self.list_index = 0;
                         self.note_index = 0;
@@ -386,9 +376,7 @@ impl<'a> App<'a> {
             EditorMode::CreateList => {
                 if !self.input.is_empty() {
                     if let Some(current_list) = self.lists.get_mut(self.file_index) {
-                        current_list.titles.push(self.input.clone());
-                        current_list.descriptions.push(String::new());
-                        current_list.notes.push(Vec::new());
+                        current_list.push_section(self.input.clone());
                         self.list_index = current_list.titles.len() - 1;
                         self.cursor_vertical = 1;
                         self.finish_input();
@@ -397,16 +385,15 @@ impl<'a> App<'a> {
             }
             EditorMode::CreateNote => {
                 if !self.input.is_empty() {
-                    if let Some(current_notes) = self
-                        .lists
-                        .get_mut(self.file_index)
-                        .and_then(|list| list.notes.get_mut(self.list_index))
-                    {
-                        current_notes.push(Note {
-                            content: self.input.clone(),
-                            state: NoteEnum::Open,
-                        });
-                        self.note_index = current_notes.len() - 1;
+                    if let Some(current_list) = self.lists.get_mut(self.file_index) {
+                        current_list.push_note(
+                            self.list_index,
+                            Note {
+                                content: self.input.clone(),
+                                state: NoteEnum::Open,
+                            },
+                        );
+                        self.note_index = current_list.notes[self.list_index].len() - 1;
                         self.cursor_vertical = 2;
                         self.finish_input();
                     }

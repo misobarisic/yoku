@@ -6,7 +6,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use yoku_core::todo::{
-    extract_naked_filename, parse_lines, FileList, MAIN_DIR, STARTER_FILE, STARTER_FILE_CONTENT,
+    extract_naked_filename, parse_markdown, FileList, MAIN_DIR, STARTER_FILE, STARTER_FILE_CONTENT,
 };
 use yoku_core::ui::app::App;
 use yoku_core::ui::run_app;
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for path in &paths {
         let contents = fs::read_to_string(path)?;
         files.push(extract_naked_filename(path)?);
-        lists.push(parse_lines(contents.lines().map(str::to_owned).collect()));
+        lists.push(parse_markdown(&contents));
     }
 
     let mut hashes: HashMap<PathBuf, u64> = paths
