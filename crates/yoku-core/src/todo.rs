@@ -12,8 +12,7 @@ use tempfile::NamedTempFile;
 
 pub const MAIN_DIR: &str = "yoku";
 pub const STARTER_FILE: &str = "tutorial.md";
-pub const STARTER_FILE_CONTENT: &str =
-    "# Start\n\nThis is a simple todo list\n\n- [ ] you may check a note state with Enter, Spacebar, x, + or -; delete it with r\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\n# Create\n\nThis list contains shortcuts related to creating new files\n\n- [ ] u = create new file (press enter to confirm)\n- [ ] i = create new list (press enter to confirm)\n- [ ] o = create new note (press enter to confirm)\n\n# Modify\n\nThis list contains shortcuts related to modifying data\n\n- [ ] e = edit current file, note or list\n- [ ] Ctrl + e = edit current list's description\n- [ ] r = remove current file, note or list (file removal asks for confirmation)\n- [ ] Ctrl + z = undo the last edit; Ctrl + y = redo (history survives saves)\n- [ ] use Escape to unselect the current note\n\n# Search and help\n\n- [ ] / = search file names, list titles, descriptions and tasks\n- [ ] n/N = next/previous search match\n- [ ] ? or F1 = show keyboard help\n\n# Exiting\n\n- [ ] q = exit and save\n- [ ] Ctrl + q or Ctrl + C = confirm before discarding unsaved changes\n";
+pub const STARTER_FILE_CONTENT: &str = include_str!("../tutorial.md");
 
 pub const STARTER_FILE_TITLE: &str = "Todo";
 pub const STARTER_FILE_DESCRIPTION: &str = "This is a simple todo list";
@@ -325,11 +324,20 @@ impl FileList {
             .as_ref()
             .and_then(|source| source.sections.get(index))
             .map_or(1, |section| {
-                section
-                    .heading_prefix
-                    .bytes()
-                    .filter(|byte| *byte == b'#')
-                    .count()
+                if section.heading.is_none() {
+                    // Renaming an implicit Inbox renders a new level-one heading.
+                    usize::from(
+                        self.titles
+                            .get(index)
+                            .is_some_and(|title| title != &section.original_title),
+                    )
+                } else {
+                    section
+                        .heading_prefix
+                        .bytes()
+                        .filter(|byte| *byte == b'#')
+                        .count()
+                }
             })
     }
 
@@ -338,10 +346,14 @@ impl FileList {
             return;
         }
         let level = self.section_level(index);
-        let count = 1
-            + (index + 1..self.titles.len())
+        // A headerless Inbox is not a parent of the explicit headings after it.
+        let count = if level == 0 {
+            1
+        } else {
+            1 + (index + 1..self.titles.len())
                 .take_while(|child| self.section_level(*child) > level)
-                .count();
+                .count()
+        };
         for _ in 0..count {
             self.take_section(index);
         }
@@ -1135,6 +1147,27 @@ fn is_raw_markdown(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse_lines, parse_markdown, NoteEnum};
+
+    #[test]
+    fn deleting_a_headerless_inbox_preserves_later_heading_trees() {
+        let source = "Introduction\r\n\r\n- [ ] inbox task\r\n\r\n## Work\r\n- [ ] keep\r\n### Details\r\n- [ ] child\r\n## Personal\r\n- [ ] other\r\n";
+        let mut list = parse_markdown(source);
+        list.remove_section_tree(0);
+        assert_eq!(list.titles, ["Work", "Details", "Personal"]);
+        assert_eq!(
+            list.to_string(),
+            "Introduction\r\n\r\n## Work\r\n- [ ] keep\r\n### Details\r\n- [ ] child\r\n## Personal\r\n- [ ] other\r\n"
+        );
+        list.remove_section_tree(0);
+        assert_eq!(list.titles, ["Personal"]);
+        assert_eq!(list.notes[0][0].content, "other");
+
+        let mut renamed = parse_markdown(source);
+        renamed.titles[0] = "Named inbox".into();
+        renamed.remove_section_tree(0);
+        assert!(renamed.titles.is_empty());
+        assert_eq!(renamed.to_string(), "Introduction\r\n\r\n");
+    }
 
     #[test]
     fn deeply_nested_tasks_can_repeat_without_losing_indentation() {

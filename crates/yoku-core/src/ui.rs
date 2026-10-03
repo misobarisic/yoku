@@ -396,8 +396,8 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         .enumerate()
         .map(|(index, name)| {
             let counts = app.file_counts(index);
-            let dirty = if app.file_is_dirty(index) { " *" } else { "" };
-            format!("{name} ({}/{}){dirty}", counts.done, counts.total())
+            let dirty = if app.file_is_dirty(index) { "* " } else { "" };
+            format!("{dirty}{name} ({}/{})", counts.done, counts.total())
         })
         .collect::<Vec<_>>();
     let (file_items, selected_file) = make_visible_tab_items(
@@ -496,30 +496,27 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                 .flat_map(|list| list.notes.iter().flatten()),
         )
     };
-    let task_title = format!(
-        "{} | {} | {} | {} open, {} done, {} rejected",
-        if app.task_view == TaskView::Lists && !description.is_empty() {
-            description
-        } else {
-            app.task_view.label()
-        },
-        app.task_filter.label(),
+    let mut task_title = format!("{} | {}", app.task_view.label(), app.task_filter.label());
+    if !app.filter_query.is_empty() {
+        task_title.push_str(&format!(" | {}", app.filter_query));
+    }
+    task_title.push_str(&format!(
+        " | {} | {} open, {} done, {} rejected",
         app.task_sort.label(),
         counts.open,
         counts.done,
         counts.rejected
-    );
-    let task_title = if app.filter_query.is_empty() {
-        task_title
-    } else {
-        format!("{task_title} | {}", app.filter_query)
-    };
+    ));
+    let mut task_block = Block::default().borders(Borders::ALL).title(task_title);
+    if app.task_view == TaskView::Lists && !description.is_empty() {
+        task_block = task_block.title_bottom(description);
+    }
     let note_list = List::new(if tasks.is_empty() {
         vec![ListItem::new("No tasks match this view")]
     } else {
         items
     })
-    .block(Block::default().borders(Borders::ALL).title(task_title))
+    .block(task_block)
     .highlight_style(
         Style::default()
             .bg(Color::DarkGray)
