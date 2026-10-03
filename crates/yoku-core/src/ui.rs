@@ -1,16 +1,18 @@
 pub mod app;
 
 use crate::todo::NoteEnum;
-use crate::ui::app::{App, EditorMode, EMPTY_LIST, EMPTY_NOTE_VEC};
+use crate::ui::app::{App, EditorMode, SaveConflictKind, EMPTY_LIST, EMPTY_NOTE_VEC};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -26,6 +28,13 @@ where
             continue;
         };
         if key.kind == KeyEventKind::Release {
+            continue;
+        }
+
+        if app.show_help {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
+                app.show_help = false;
+            }
             continue;
         }
 
@@ -73,13 +82,20 @@ where
             continue;
         }
 
-        if key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::CONTROL {
+        if app.mode == EditorMode::Nothing
+            && key.code == KeyCode::Char('z')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
             app.undo_last_delete();
             continue;
         }
 
         match app.mode {
             EditorMode::Nothing => match key.code {
+                KeyCode::Char('/') => app.begin_search(),
+                KeyCode::Char('?') | KeyCode::F(1) => app.show_help = true,
+                KeyCode::Char('n') => app.search_next(true),
+                KeyCode::Char('N') => app.search_next(false),
                 KeyCode::Char('o') => app.create_note(),
                 KeyCode::Char('u') => app.create_file(),
                 KeyCode::Char('i') => app.create_list(),
@@ -91,21 +107,25 @@ where
                         app.change();
                     }
                 }
-                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
-                    if !app.begin_discard_confirmation() {
-                        return Ok(());
-                    }
+                KeyCode::Char('q')
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && !app.begin_discard_confirmation() =>
+                {
+                    return Ok(())
                 }
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {}
                 KeyCode::Char('q') => match app.save() {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
                     Err(error) => app.status_message = Some(format!("Save failed: {error}")),
                 },
-                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                    if !app.begin_discard_confirmation() {
-                        return Ok(());
-                    }
+                KeyCode::Char('c')
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && !app.begin_discard_confirmation() =>
+                {
+                    return Ok(())
                 }
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {}
                 KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('l') => app.next(),
                 KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('h') => app.previous(),
                 KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k') => app.navigate_up(),
@@ -126,16 +146,20 @@ where
                 _ => {}
             },
             _ => match key.code {
-                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
-                    if !app.begin_discard_confirmation() {
-                        return Ok(());
-                    }
+                KeyCode::Char('q')
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && !app.begin_discard_confirmation() =>
+                {
+                    return Ok(())
                 }
-                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
-                    if !app.begin_discard_confirmation() {
-                        return Ok(());
-                    }
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {}
+                KeyCode::Char('c')
+                    if key.modifiers == KeyModifiers::CONTROL
+                        && !app.begin_discard_confirmation() =>
+                {
+                    return Ok(())
                 }
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {}
                 KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
                     app.move_input_home()
                 }
@@ -168,39 +192,55 @@ where
 
 pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     let area = frame.area();
-    let chunks = if app.mode != EditorMode::Nothing {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints(
-                [
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                    Constraint::Length(3),
-                ]
-                .as_ref(),
-            )
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints(
-                [
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                ]
-                .as_ref(),
-            )
-            .split(area)
-    };
-
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(31, 41, 55)).fg(Color::White)),
         area,
     );
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if app.show_help {
+        render_help(frame, area);
+        return;
+    }
+
+    let editing = app.mode != EditorMode::Nothing;
+    let minimum_height = if editing { 13 } else { 10 };
+    if area.width < 20 || area.height < minimum_height {
+        render_compact(frame, area, app);
+        render_status(frame, area, app);
+        return;
+    }
+
+    let content_area = Rect::new(0, 0, area.width, area.height.saturating_sub(1));
+    let chunks = if editing {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints(
+                [
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                    Constraint::Length(3),
+                ]
+                .as_ref(),
+            )
+            .split(content_area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints(
+                [
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                ]
+                .as_ref(),
+            )
+            .split(content_area)
+    };
 
     let current_list = app.lists.get(app.file_index).unwrap_or(EMPTY_LIST);
     let mut list_tabs = Tabs::new(make_tab_items(&current_list.titles))
@@ -280,6 +320,7 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                         EditorMode::ChangeListName => "Change List Name",
                         EditorMode::ChangeListDescription => "Change List Description",
                         EditorMode::ChangeNoteContent => "Change Note Content",
+                        EditorMode::Search => "Search",
                         EditorMode::Nothing => "",
                     })
                     .style(Style::default().fg(Color::LightCyan)),
@@ -292,49 +333,148 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                     .min(input_width) as u16,
             );
             let cursor_y = chunks[3].y.saturating_add(1);
-            frame.set_cursor_position((cursor_x, cursor_y));
+            if cursor_x < chunks[3].x.saturating_add(chunks[3].width)
+                && cursor_y < chunks[3].y.saturating_add(chunks[3].height)
+            {
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
         }
     }
 
-    if area.height > 0 {
-        let message = app
-            .confirm_discard
-            .then(|| "Unsaved changes. Press y to discard or Esc to keep editing".to_owned())
-            .or_else(|| {
-                app.pending_file_delete.map(|index| {
-                    format!(
-                        "Delete file '{}'? Press y/Enter to confirm or Esc to cancel",
-                        app.files
-                            .get(index)
-                            .map(String::as_str)
-                            .unwrap_or("unknown")
-                    )
-                })
+    render_status(frame, area, app);
+}
+
+fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
+    if area.height == 0 {
+        return;
+    }
+    let message = app
+        .confirm_discard
+        .then(|| "Unsaved changes. Press y to discard or Esc to keep editing".to_owned())
+        .or_else(|| {
+            app.pending_file_delete.map(|index| {
+                format!(
+                    "Delete file '{}'? Press y/Enter to confirm or Esc to cancel",
+                    app.files
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("unknown")
+                )
             })
-            .or_else(|| {
-                app.save_conflict.as_ref().map(|conflict| {
-                    let action =
-                        if conflict.kind == crate::ui::app::SaveConflictKind::DestinationExists {
-                            "o overwrite, Esc cancel"
-                        } else {
-                            "r reload, o overwrite, Esc cancel"
-                        };
-                    format!("Save conflict at {}. {action}", conflict.path.display())
-                })
+        })
+        .or_else(|| {
+            app.save_conflict.as_ref().map(|conflict| {
+                let action = if conflict.kind == SaveConflictKind::DestinationExists {
+                    "o overwrite, Esc cancel"
+                } else {
+                    "r reload, o overwrite, Esc cancel"
+                };
+                format!("Save conflict at {}. {action}", conflict.path.display())
             })
-            .or_else(|| app.status_message.clone());
-        if let Some(message) = message {
-            let status = Paragraph::new(message).style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .bg(Color::Rgb(31, 41, 55)),
-            );
+        })
+        .or_else(|| app.status_message.clone())
+        .unwrap_or_else(|| "?: help  /: search  Ctrl+Z: undo  q: save and quit".into());
+    let status = Paragraph::new(message).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Rgb(31, 41, 55)),
+    );
+    frame.render_widget(status, Rect::new(0, area.height - 1, area.width, 1));
+}
+
+fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
+    let list = app.lists.get(app.file_index).unwrap_or(EMPTY_LIST);
+    let filename = app
+        .files
+        .get(app.file_index)
+        .map(String::as_str)
+        .unwrap_or("(no file)");
+    let title = list
+        .titles
+        .get(app.list_index)
+        .map(String::as_str)
+        .unwrap_or("(no list)");
+    let note = list
+        .notes
+        .get(app.list_index)
+        .and_then(|notes| notes.get(app.note_index))
+        .map(|note| note.to_string())
+        .unwrap_or_else(|| "(no task)".into());
+    let body_height = area.height.saturating_sub(1);
+    if app.mode != EditorMode::Nothing {
+        let context = format!("{filename} / {title}");
+        if body_height > 1 {
             frame.render_widget(
-                status,
-                ratatui::layout::Rect::new(0, area.height - 1, area.width, 1),
+                Paragraph::new(context)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(Color::White)),
+                Rect::new(0, 0, area.width, body_height - 1),
             );
         }
+        let label = match app.mode {
+            EditorMode::CreateFile => "File",
+            EditorMode::CreateList => "List",
+            EditorMode::CreateNote => "Task",
+            EditorMode::ChangeFileName => "File",
+            EditorMode::ChangeListName => "List",
+            EditorMode::ChangeListDescription => "Description",
+            EditorMode::ChangeNoteContent => "Task",
+            EditorMode::Search => "Search",
+            EditorMode::Nothing => "Input",
+        };
+        let prefix = format!("{label}: ");
+        let line = format!("{prefix}{}", app.input);
+        let cursor_cell =
+            UnicodeWidthStr::width(prefix.as_str()) + app.input_cursor_display_width();
+        let visible_width = area.width as usize;
+        let horizontal_scroll = cursor_cell.saturating_sub(visible_width.saturating_sub(1));
+        let input_row = body_height.saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(line)
+                .scroll((horizontal_scroll.min(u16::MAX as usize) as u16, 0))
+                .style(Style::default().fg(Color::White).bg(Color::DarkGray)),
+            Rect::new(0, input_row, area.width, 1),
+        );
+        if body_height > 0 && area.width > 0 {
+            let cursor_x = cursor_cell
+                .saturating_sub(horizontal_scroll)
+                .min(visible_width.saturating_sub(1)) as u16;
+            frame.set_cursor_position((cursor_x, input_row));
+        }
+        return;
     }
+    let content = vec![
+        Line::from(format!("File: {filename}")),
+        Line::from(format!("List: {title}")),
+        Line::from(format!("Task: {note}")),
+        Line::from("Resize terminal for full view"),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Color::White)),
+        Rect::new(0, 0, area.width, body_height),
+    );
+}
+
+fn render_help(frame: &mut Frame<'_>, area: Rect) {
+    let width = area.width.min(72);
+    let height = area.height.min(20);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes the last deletion.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(help)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title("Yoku help"))
+            .style(Style::default().fg(Color::White)),
+        rect,
+    );
 }
 
 pub fn make_tab_items(values: &[String]) -> Vec<Line<'static>> {
@@ -342,7 +482,7 @@ pub fn make_tab_items(values: &[String]) -> Vec<Line<'static>> {
         .iter()
         .map(|value| {
             let split_at = value
-                .char_indices()
+                .grapheme_indices(true)
                 .nth(1)
                 .map_or(value.len(), |(index, _)| index);
             let (first, rest) = value.split_at(split_at);
@@ -352,4 +492,101 @@ pub fn make_tab_items(values: &[String]) -> Vec<Line<'static>> {
             ])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{make_tab_items, ui};
+    use crate::todo::{FileList, Note, NoteEnum};
+    use crate::ui::app::{App, EditorMode};
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::collections::HashMap;
+
+    #[test]
+    fn layout_renders_after_tiny_and_large_resizes() {
+        let mut files = Vec::new();
+        let mut paths = Vec::new();
+        let mut lists = Vec::new();
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            std::path::Path::new("."),
+            &mut removed,
+        );
+
+        for (width, height) in [(1, 1), (10, 5), (19, 14), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| ui(frame, &mut app)).unwrap();
+        }
+        app.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).unwrap();
+        terminal.draw(|frame| ui(frame, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn long_tabs_and_task_lists_render_without_panicking() {
+        let mut files = vec!["📚".repeat(200)];
+        let mut paths = vec![std::path::PathBuf::from("long.md")];
+        let mut lists = vec![FileList::from_parts(
+            vec!["🧑‍💻 planning".repeat(100)],
+            vec!["details".repeat(100)],
+            vec![(0..500)
+                .map(|index| Note {
+                    content: format!("task {index}"),
+                    state: NoteEnum::Open,
+                })
+                .collect()],
+        )];
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            std::path::Path::new("."),
+            &mut removed,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+        terminal.draw(|frame| ui(frame, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn tab_split_keeps_a_full_emoji_grapheme_together() {
+        let tabs = make_tab_items(&["👩‍💻 tools".to_owned()]);
+        assert_eq!(tabs[0].spans[0].content, "👩‍💻");
+        assert_eq!(tabs[0].spans[1].content, " tools");
+    }
+
+    #[test]
+    fn compact_editor_layout_keeps_input_visible() {
+        let mut files = vec!["work".into()];
+        let mut paths = Vec::new();
+        let mut lists = vec![FileList::default()];
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            std::path::Path::new("."),
+            &mut removed,
+        );
+        app.mode = EditorMode::CreateNote;
+        app.input = "draft note".into();
+        app.input_cursor = 5;
+        let mut terminal = Terminal::new(TestBackend::new(15, 7)).unwrap();
+        terminal.draw(|frame| ui(frame, &mut app)).unwrap();
+    }
 }

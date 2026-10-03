@@ -24,6 +24,7 @@ pub enum EditorMode {
     ChangeListName,
     ChangeListDescription,
     ChangeNoteContent,
+    Search,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,13 @@ enum UndoAction {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SearchMatch {
+    file_index: usize,
+    section_index: Option<usize>,
+    note_index: Option<usize>,
+}
+
 pub struct App<'a> {
     pub main_path: &'a Path,
     pub files: &'a mut Vec<String>,
@@ -80,10 +88,14 @@ pub struct App<'a> {
     pub save_conflict: Option<SaveConflict>,
     pub pending_file_delete: Option<usize>,
     pub confirm_discard: bool,
+    pub show_help: bool,
+    pub search_query: String,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
     undo_stack: Vec<UndoAction>,
+    search_matches: Vec<SearchMatch>,
+    search_index: Option<usize>,
 }
 
 impl<'a> App<'a> {
@@ -118,9 +130,13 @@ impl<'a> App<'a> {
             save_conflict: None,
             pending_file_delete: None,
             confirm_discard: false,
+            show_help: false,
+            search_query: String::new(),
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
+            search_matches: Vec::new(),
+            search_index: None,
         };
         app.validate_and_update_indices();
         app
@@ -462,6 +478,9 @@ impl<'a> App<'a> {
                 self.lists.push(list);
             }
             self.to_remove.retain(|removed| removed != &path);
+            self.undo_stack.retain(|action| {
+                !matches!(action, UndoAction::File { path: deleted, .. } if deleted == &path)
+            });
             self.hashes.insert(path.clone(), file_hash);
             self.disk_hashes.insert(path, disk_hash);
             self.validate_and_update_indices();
@@ -531,11 +550,10 @@ impl<'a> App<'a> {
 
     pub fn remove(&mut self) {
         match self.cursor_vertical {
-            0 => {
-                if self.file_index < self.files.len() {
-                    self.pending_file_delete = Some(self.file_index);
-                }
+            0 if self.file_index < self.files.len() => {
+                self.pending_file_delete = Some(self.file_index);
             }
+            0 => {}
             1 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
                     if let Some(removed) = list.take_section(self.list_index) {
@@ -650,7 +668,7 @@ impl<'a> App<'a> {
     }
 
     pub fn has_unsaved_changes(&self) -> bool {
-        self.mode != EditorMode::Nothing
+        (self.mode != EditorMode::Nothing && self.mode != EditorMode::Search)
             || self.pending_file_delete.is_some()
             || !self.to_remove.is_empty()
             || self
@@ -672,6 +690,147 @@ impl<'a> App<'a> {
     pub fn cancel_discard(&mut self) {
         self.confirm_discard = false;
         self.status_message = Some("Discard canceled; your changes are still available".into());
+    }
+
+    pub fn begin_search(&mut self) {
+        self.mode = EditorMode::Search;
+        self.set_input(String::new());
+        self.status_message = None;
+    }
+
+    pub fn complete_search(&mut self) {
+        self.search_query = self.input.clone();
+        self.input.clear();
+        self.input_cursor = 0;
+        self.mode = EditorMode::Nothing;
+        self.search_index = None;
+        self.refresh_search_matches();
+        if self.search_matches.is_empty() {
+            self.status_message = Some(format!("No matches for '{}'", self.search_query));
+        } else {
+            self.search_index = Some(0);
+            self.show_search_match();
+        }
+    }
+
+    pub fn search_next(&mut self, forward: bool) {
+        if self.search_query.is_empty() {
+            self.status_message = Some("Press / to search".into());
+            return;
+        }
+        self.refresh_search_matches();
+        if self.search_matches.is_empty() {
+            self.search_index = None;
+            self.status_message = Some(format!("No matches for '{}'", self.search_query));
+            return;
+        }
+        let count = self.search_matches.len();
+        let next = match (self.search_index, forward) {
+            (None, _) => 0,
+            (Some(current), true) => (current + 1) % count,
+            (Some(0), false) => count - 1,
+            (Some(current), false) => current - 1,
+        };
+        self.search_index = Some(next);
+        self.show_search_match();
+    }
+
+    fn refresh_search_matches(&mut self) {
+        if self.search_query.is_empty() {
+            self.search_matches.clear();
+            self.search_index = None;
+            return;
+        }
+        let query = self.search_query.to_lowercase();
+        let mut matches = Vec::new();
+        let mut seen = HashSet::new();
+        for (file_index, name) in self.files.iter().enumerate() {
+            if name.to_lowercase().contains(&query) {
+                add_search_match(
+                    &mut matches,
+                    &mut seen,
+                    SearchMatch {
+                        file_index,
+                        section_index: None,
+                        note_index: None,
+                    },
+                );
+            }
+            let Some(list) = self.lists.get(file_index) else {
+                continue;
+            };
+            for section_index in 0..list.titles.len() {
+                let title_match = list
+                    .titles
+                    .get(section_index)
+                    .is_some_and(|title| title.to_lowercase().contains(&query));
+                let description_match = list
+                    .descriptions
+                    .get(section_index)
+                    .is_some_and(|description| description.to_lowercase().contains(&query));
+                if title_match || description_match {
+                    add_search_match(
+                        &mut matches,
+                        &mut seen,
+                        SearchMatch {
+                            file_index,
+                            section_index: Some(section_index),
+                            note_index: None,
+                        },
+                    );
+                }
+                if let Some(notes) = list.notes.get(section_index) {
+                    for (note_index, note) in notes.iter().enumerate() {
+                        if note.content.to_lowercase().contains(&query) {
+                            add_search_match(
+                                &mut matches,
+                                &mut seen,
+                                SearchMatch {
+                                    file_index,
+                                    section_index: Some(section_index),
+                                    note_index: Some(note_index),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        self.search_matches = matches;
+        self.search_index = self
+            .search_index
+            .map(|index| index.min(self.search_matches.len().saturating_sub(1)));
+    }
+
+    fn show_search_match(&mut self) {
+        let Some(index) = self.search_index else {
+            return;
+        };
+        let Some(found) = self.search_matches.get(index) else {
+            return;
+        };
+        self.file_index = found.file_index;
+        if let Some(section_index) = found.section_index {
+            self.list_index = section_index;
+            if let Some(note_index) = found.note_index {
+                self.note_index = note_index;
+                self.cursor_vertical = 2;
+            } else {
+                self.note_index = 0;
+                self.cursor_vertical = 1;
+            }
+        } else {
+            self.list_index = 0;
+            self.note_index = 0;
+            self.cursor_vertical = 0;
+        }
+        self.validate_and_update_indices();
+        self.status_message = Some(format!(
+            "Search '{}': match {} of {} (n/N next/previous)",
+            self.search_query,
+            index + 1,
+            self.search_matches.len()
+        ));
     }
 
     pub fn create_file(&mut self) {
@@ -860,6 +1019,7 @@ impl<'a> App<'a> {
                     self.finish_input();
                 }
             }
+            EditorMode::Search => self.complete_search(),
             EditorMode::Nothing => {}
         }
         self.validate_and_update_indices();
@@ -884,6 +1044,16 @@ fn grapheme_index_at_byte(input: &str, byte_index: usize) -> usize {
         .grapheme_indices(true)
         .take_while(|(start, _)| *start < byte_index)
         .count()
+}
+
+fn add_search_match(
+    matches: &mut Vec<SearchMatch>,
+    seen: &mut HashSet<SearchMatch>,
+    found: SearchMatch,
+) {
+    if seen.insert(found.clone()) {
+        matches.push(found);
+    }
 }
 
 fn valid_file_stem(name: &str) -> bool {
@@ -916,17 +1086,16 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
 
-    fn app_data(
-        root: &std::path::Path,
-        contents: &str,
-    ) -> (
+    type AppData = (
         Vec<String>,
         Vec<std::path::PathBuf>,
         Vec<FileList>,
         HashMap<std::path::PathBuf, u64>,
         HashMap<std::path::PathBuf, u64>,
         Vec<std::path::PathBuf>,
-    ) {
+    );
+
+    fn app_data(root: &std::path::Path, contents: &str) -> AppData {
         let path = root.join("todos.md");
         fs::write(&path, contents).unwrap();
         let list = parse_markdown(contents);
@@ -1145,5 +1314,64 @@ mod tests {
         app.cancel_discard();
         assert_eq!(app.lists[0].notes[0][0].content, "local edit");
         assert!(!app.confirm_discard);
+    }
+
+    #[test]
+    fn search_matches_names_descriptions_and_tasks_case_insensitively() {
+        let directory = tempfile::tempdir().unwrap();
+        let contents = "# Planning\nQuartz notes\n- [ ] Fix quartz edge case\n";
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), contents);
+        files[0] = "QuArTz".into();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.begin_search();
+        for character in "QUARTZ".chars() {
+            app.insert_input_char(character);
+        }
+        app.handle_enter();
+        assert_eq!(app.cursor_vertical, 0);
+        app.search_next(true);
+        assert_eq!(app.cursor_vertical, 1);
+        app.search_next(true);
+        assert_eq!(app.cursor_vertical, 2);
+        app.search_next(false);
+        assert_eq!(app.cursor_vertical, 1);
+    }
+
+    #[test]
+    fn search_with_no_matches_is_safe_on_empty_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        let mut paths = Vec::new();
+        let mut lists = Vec::new();
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.begin_search();
+        app.insert_input_char('x');
+        app.handle_enter();
+        assert_eq!(app.file_index, 0);
+        assert_eq!(app.search_index, None);
+        app.search_next(true);
+        assert_eq!(app.file_index, 0);
     }
 }

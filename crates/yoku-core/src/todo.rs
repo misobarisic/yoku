@@ -9,7 +9,7 @@ use tempfile::NamedTempFile;
 pub const MAIN_DIR: &str = "yoku";
 pub const STARTER_FILE: &str = "tutorial.md";
 pub const STARTER_FILE_CONTENT: &str =
-    "# Start\n\nThis is a simple todo list\n\n- [ ] you may check a note state with Enter, Spacebar, x, + or -; delete it with r\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\n# Create\n\nThis list contains shortcuts related to creating new files\n\n- [ ] u = create new file (press enter to confirm)\n- [ ] i = create new list (press enter to confirm)\n- [ ] o = create new note (press enter to confirm)\n\n# Modify\n\nThis list contains shortcuts related to modifying data\n\n- [ ] e = edit current file, note or list\n- [ ] Ctrl + e = edit current list's description\n- [ ] r = remove current file, note or list\n- [ ] use Escape to unselect the current note\n\n# Exiting\n\n- [ ] q = exit and save\n- [ ] Ctrl + q = exit and discard changes\n- [ ] Ctrl + C = exit and discard changes\n";
+    "# Start\n\nThis is a simple todo list\n\n- [ ] you may check a note state with Enter, Spacebar, x, + or -; delete it with r\n- [ ] navigation keys include WASD, HJKL and arrow keys\n\n# Create\n\nThis list contains shortcuts related to creating new files\n\n- [ ] u = create new file (press enter to confirm)\n- [ ] i = create new list (press enter to confirm)\n- [ ] o = create new note (press enter to confirm)\n\n# Modify\n\nThis list contains shortcuts related to modifying data\n\n- [ ] e = edit current file, note or list\n- [ ] Ctrl + e = edit current list's description\n- [ ] r = remove current file, note or list (file removal asks for confirmation)\n- [ ] Ctrl + z = undo the last deletion until the next save\n- [ ] use Escape to unselect the current note\n\n# Search and help\n\n- [ ] / = search file names, list titles, descriptions and tasks\n- [ ] n/N = next/previous search match\n- [ ] ? or F1 = show keyboard help\n\n# Exiting\n\n- [ ] q = exit and save\n- [ ] Ctrl + q or Ctrl + C = confirm before discarding unsaved changes\n";
 
 pub const STARTER_FILE_TITLE: &str = "Todo";
 pub const STARTER_FILE_DESCRIPTION: &str = "This is a simple todo list";
@@ -174,9 +174,7 @@ impl FileList {
     }
 
     pub fn remove_note(&mut self, section_index: usize, note_index: usize) -> Option<RemovedNote> {
-        let Some(section_notes) = self.notes.get_mut(section_index) else {
-            return None;
-        };
+        let section_notes = self.notes.get_mut(section_index)?;
         if note_index >= section_notes.len() {
             return None;
         }
@@ -681,6 +679,17 @@ mod tests {
         assert_eq!(
             list.to_string(),
             "# Roadmap\nA description\n\n## Details\n> keep this quote\n- [x] first\n"
+        );
+    }
+
+    #[test]
+    fn editing_a_description_keeps_unrecognized_markdown_blocks() {
+        let source = "# Plans\nOld description\n## Details\n> keep this quote\n- [ ] first\n";
+        let mut list = parse_markdown(source);
+        list.descriptions[0] = "New description".to_owned();
+        assert_eq!(
+            list.to_string(),
+            "# Plans\nNew description\n## Details\n> keep this quote\n- [ ] first\n"
         );
     }
 
