@@ -336,7 +336,10 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                 "- "
             };
             ListItem::new(Line::from(vec![
-                Span::raw(format!("{marker}{prefix}")),
+                Span::raw(format!(
+                    "{marker}{}{prefix}",
+                    " ".repeat(current_list.note_depth(app.list_index, index).min(40))
+                )),
                 Span::raw(note.content.as_str()),
             ]))
             .style(Style::default().fg(Color::White))

@@ -46,6 +46,8 @@ Please make sure to update tests as appropriate.
 
 The default data directory depends on your platform. Print it with `yoku --data-path`, or choose a different directory with `yoku --main-path ./todos`. Yoku reads Markdown (`.md`) files from that directory and preserves Markdown it does not edit.
 
+Lists can use headings from `#` through `######`. Checklists without a heading appear as an implicit Inbox. Tasks support `-`, `*`, `+`, and numbered bullets, uppercase or lowercase checked markers, and indented subtasks. Checkbox edits preserve the original bullet, indentation, and spacing. Code examples are excluded from tasks. Deleting a parent task includes its subtasks and continuation text; deleting a heading includes its subheadings. Both are undoable.
+
 ## Keyboard shortcuts
 
 - Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.

@@ -15,6 +15,7 @@ ratatui = "0.30"
 tempfile = "3"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [package]
 name = "yoku"

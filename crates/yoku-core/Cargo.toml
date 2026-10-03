@@ -11,3 +11,4 @@ ratatui.workspace = true
 tempfile.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+pulldown-cmark.workspace = true

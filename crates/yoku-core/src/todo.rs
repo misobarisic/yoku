@@ -1,3 +1,5 @@
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::{
     fmt, fs,
@@ -33,7 +35,9 @@ struct SourceDocument {
 
 #[derive(Clone, Debug)]
 struct SourceSection {
-    heading: SourceLine,
+    heading: Option<SourceLine>,
+    heading_prefix: String,
+    heading_suffix: String,
     original_title: String,
     body: Vec<SourceBlock>,
 }
@@ -51,6 +55,7 @@ enum SourceBlockKind {
     Note {
         index: usize,
         original: Option<Note>,
+        span_lines: usize,
     },
 }
 
@@ -73,6 +78,12 @@ pub struct RemovedNote {
     note: Note,
     body_index: Option<usize>,
     source_block: Option<SourceBlock>,
+}
+
+/// A task, its subtasks, and continuation Markdown travel together.
+pub struct TaskGroup {
+    lines: Vec<SourceLine>,
+    base_indent: usize,
 }
 
 impl FileList {
@@ -128,10 +139,12 @@ impl FileList {
                 }
             }
             source.sections.push(SourceSection {
-                heading: SourceLine {
+                heading: Some(SourceLine {
                     text: format!("# {title}"),
                     ending: source.newline.clone(),
-                },
+                }),
+                heading_prefix: "# ".into(),
+                heading_suffix: String::new(),
                 original_title: title,
                 body: Vec::new(),
             });
@@ -166,6 +179,7 @@ impl FileList {
                         kind: SourceBlockKind::Note {
                             index: note_index,
                             original: None,
+                            span_lines: 1,
                         },
                     },
                 );
@@ -275,6 +289,202 @@ impl FileList {
             }
         }
     }
+
+    pub fn note_depth(&self, section_index: usize, note_index: usize) -> usize {
+        self.source
+            .as_ref()
+            .and_then(|source| source.sections.get(section_index))
+            .and_then(|section| {
+                section.body.iter().find(|block| {
+                matches!(block.kind, SourceBlockKind::Note { index, .. } if index == note_index)
+            })
+            })
+            .map_or(0, |block| indentation(&block.line.text))
+    }
+
+    pub fn section_level(&self, index: usize) -> usize {
+        self.source
+            .as_ref()
+            .and_then(|source| source.sections.get(index))
+            .map_or(1, |section| {
+                section
+                    .heading_prefix
+                    .bytes()
+                    .filter(|byte| *byte == b'#')
+                    .count()
+            })
+    }
+
+    pub fn remove_section_tree(&mut self, index: usize) {
+        if index >= self.titles.len() {
+            return;
+        }
+        let level = self.section_level(index);
+        let count = 1
+            + (index + 1..self.titles.len())
+                .take_while(|child| self.section_level(*child) > level)
+                .count();
+        for _ in 0..count {
+            self.take_section(index);
+        }
+    }
+
+    fn reparse(&mut self) {
+        *self = parse_markdown(&self.to_string());
+    }
+
+    pub fn take_task_group(
+        &mut self,
+        section_index: usize,
+        note_index: usize,
+    ) -> Option<TaskGroup> {
+        self.reparse();
+        let section = self.source.as_mut()?.sections.get_mut(section_index)?;
+        let start = section.body.iter().position(|block| {
+            matches!(block.kind, SourceBlockKind::Note { index, .. } if index == note_index)
+        })?;
+        let SourceBlockKind::Note { span_lines, .. } = section.body[start].kind else {
+            return None;
+        };
+        let mut end = (start + span_lines).min(section.body.len());
+        while end > start + 1 && section.body[end - 1].line.text.trim().is_empty() {
+            end -= 1;
+        }
+        let base_indent = indentation(&section.body[start].line.text);
+        let lines = section
+            .body
+            .drain(start..end)
+            .map(|block| block.line)
+            .collect();
+        self.reparse();
+        Some(TaskGroup { lines, base_indent })
+    }
+
+    pub fn insert_task_group(
+        &mut self,
+        section_index: usize,
+        note_index: usize,
+        group: TaskGroup,
+        depth: usize,
+    ) -> bool {
+        self.reparse();
+        let Some(source) = self.source.as_mut() else {
+            return false;
+        };
+        let Some(section) = source.sections.get_mut(section_index) else {
+            return false;
+        };
+        let insert_at = section.body.iter().position(|block| {
+            matches!(block.kind, SourceBlockKind::Note { index, .. } if index == note_index)
+        }).unwrap_or_else(|| {
+            let mut end = section.body.len();
+            while end > 0 && section.body[end - 1].line.text.trim().is_empty() { end -= 1; }
+            end
+        });
+        let blocks = group
+            .lines
+            .into_iter()
+            .map(|mut line| {
+                let columns = indentation(&line.text);
+                if columns >= group.base_indent && !line.text.is_empty() {
+                    line.text = format!(
+                        "{}{}",
+                        " ".repeat(columns - group.base_indent + depth),
+                        line.text.trim_start_matches([' ', '\t'])
+                    );
+                }
+                line.ending.clone_from(&source.newline);
+                SourceBlock {
+                    line,
+                    kind: SourceBlockKind::Raw,
+                }
+            })
+            .collect::<Vec<_>>();
+        section.body.splice(insert_at..insert_at, blocks);
+        self.reparse();
+        true
+    }
+
+    pub fn reorder_task(&mut self, section: usize, index: usize, down: bool) -> Option<usize> {
+        self.reparse();
+        let count = self.notes.get(section)?.len();
+        if index >= count {
+            return None;
+        }
+        let depth = self.note_depth(section, index);
+        let target = if down {
+            let sibling = (index + 1..count).find(|i| self.note_depth(section, *i) <= depth)?;
+            if self.note_depth(section, sibling) != depth {
+                return None;
+            }
+            (sibling + 1..count)
+                .find(|i| self.note_depth(section, *i) <= depth)
+                .unwrap_or(count)
+        } else {
+            let sibling = (0..index)
+                .rev()
+                .find(|i| self.note_depth(section, *i) <= depth)?;
+            if self.note_depth(section, sibling) != depth {
+                return None;
+            }
+            sibling
+        };
+        let group = self.take_task_group(section, index)?;
+        let removed_count = count - self.notes.get(section).map_or(0, Vec::len);
+        let target = if down { target - removed_count } else { target };
+        self.insert_task_group(section, target, group, depth)
+            .then_some(target)
+    }
+
+    pub fn indent_task(&mut self, section: usize, index: usize, outdent: bool) -> bool {
+        self.reparse();
+        let depth = self.note_depth(section, index);
+        let parent = (0..index).rev().find(|i| {
+            let previous = self.note_depth(section, *i);
+            if outdent {
+                previous < depth
+            } else {
+                previous <= depth
+            }
+        });
+        let Some(parent) = parent else {
+            return false;
+        };
+        let new_depth = if outdent {
+            self.note_depth(section, parent)
+        } else {
+            let Some(block) = self.source.as_ref().and_then(|source| source.sections.get(section))
+                .and_then(|section| section.body.iter().find(|block| matches!(block.kind, SourceBlockKind::Note { index, .. } if index == parent))) else { return false; };
+            let Some(parts) = task_line_parts(&block.line.text) else {
+                return false;
+            };
+            block.line.text[..parts.marker_start]
+                .chars()
+                .fold(0, |columns, c| {
+                    if c == '\t' {
+                        (columns / 4 + 1) * 4
+                    } else {
+                        columns + 1
+                    }
+                })
+        };
+        let Some(group) = self.take_task_group(section, index) else {
+            return false;
+        };
+        self.insert_task_group(section, index, group, new_depth)
+    }
+}
+
+fn indentation(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .fold(0, |columns, c| {
+            if c == '\t' {
+                (columns / 4 + 1) * 4
+            } else {
+                columns + 1
+            }
+        })
 }
 
 impl FileList {
@@ -326,11 +536,20 @@ impl fmt::Display for FileList {
                 let Some(title) = self.titles.get(section_index) else {
                     continue;
                 };
-                let mut heading = section.heading.clone();
-                if title != &section.original_title {
-                    heading.text = format!("# {title}");
+                if let Some(mut heading) = section.heading.clone() {
+                    if title != &section.original_title {
+                        heading.text = format!(
+                            "{}{title}{}",
+                            section.heading_prefix, section.heading_suffix
+                        );
+                    }
+                    lines.push(heading);
+                } else if title != &section.original_title {
+                    lines.push(SourceLine {
+                        text: format!("# {title}"),
+                        ending: source.newline.clone(),
+                    });
                 }
-                lines.push(heading);
 
                 let description = self
                     .descriptions
@@ -368,12 +587,14 @@ impl fmt::Display for FileList {
                             wrote_description = true;
                         }
                         SourceBlockKind::Description => {}
-                        SourceBlockKind::Note { index, original } => {
+                        SourceBlockKind::Note {
+                            index, original, ..
+                        } => {
                             if *index < note_count {
                                 let note = &self.notes[section_index][*index];
                                 let mut line = block.line.clone();
                                 if original.as_ref() != Some(note) {
-                                    line.text = note.to_string();
+                                    line.text = render_task_line(&line.text, note);
                                 }
                                 lines.push(line);
                             }
@@ -520,6 +741,7 @@ pub fn parse_lines(lines: Vec<String>) -> FileList {
 
 pub fn parse_markdown(contents: &str) -> FileList {
     let lines = split_source_lines(contents);
+    let shape = markdown_shape(contents, &lines);
     let newline = lines
         .iter()
         .find(|line| !line.ending.is_empty())
@@ -531,31 +753,43 @@ pub fn parse_markdown(contents: &str) -> FileList {
     let mut source_sections = Vec::new();
     let mut current: Option<SourceSection> = None;
 
-    for line in lines {
-        if let Some(title) = line.text.strip_prefix("# ") {
-            let original_title = title.to_owned();
-            if let Some(section) = current.take() {
-                finish_source_section(section, &mut file_list, &mut source_sections);
+    for (line_index, line) in lines.into_iter().enumerate() {
+        if shape.headings.contains(&line_index) {
+            if let Some((title, prefix, suffix)) = heading_parts(&line.text) {
+                if let Some(section) = current.take() {
+                    finish_source_section(section, &mut file_list, &mut source_sections);
+                }
+                current = Some(SourceSection {
+                    heading: Some(line),
+                    heading_prefix: prefix,
+                    heading_suffix: suffix,
+                    original_title: title,
+                    body: Vec::new(),
+                });
+                continue;
             }
+        }
+        let parsed_note = shape.tasks.get(&line_index);
+        if current.is_none() && parsed_note.is_some() {
             current = Some(SourceSection {
-                heading: line,
-                original_title,
+                heading: None,
+                heading_prefix: String::new(),
+                heading_suffix: String::new(),
+                original_title: "Inbox".into(),
                 body: Vec::new(),
             });
-            continue;
         }
-
         let Some(section) = current.as_mut() else {
             preamble.push(line);
             continue;
         };
-        let parsed_note = line.text.strip_prefix("- ").and_then(parse_note_line);
-        let kind = if let Some(note) = parsed_note {
+        let kind = if let Some((note, span_lines)) = parsed_note {
             SourceBlockKind::Note {
                 index: 0,
-                original: Some(note),
+                original: Some(note.clone()),
+                span_lines: *span_lines,
             }
-        } else if is_raw_markdown(&line.text) {
+        } else if shape.raw.contains(&line_index) || is_raw_markdown(&line.text) {
             SourceBlockKind::Raw
         } else {
             SourceBlockKind::Description
@@ -565,7 +799,6 @@ pub fn parse_markdown(contents: &str) -> FileList {
     if let Some(section) = current {
         finish_source_section(section, &mut file_list, &mut source_sections);
     }
-
     file_list.source = Some(SourceDocument {
         preamble,
         sections: source_sections,
@@ -573,6 +806,153 @@ pub fn parse_markdown(contents: &str) -> FileList {
         final_newline,
     });
     file_list
+}
+
+#[derive(Default)]
+struct MarkdownShape {
+    headings: HashSet<usize>,
+    tasks: HashMap<usize, (Note, usize)>,
+    raw: HashSet<usize>,
+}
+
+fn markdown_shape(contents: &str, lines: &[SourceLine]) -> MarkdownShape {
+    let mut offsets = Vec::with_capacity(lines.len());
+    let mut offset = 0;
+    for line in lines {
+        offsets.push(offset);
+        offset += line.text.len() + line.ending.len();
+    }
+    let mut shape = MarkdownShape::default();
+    let mut item_depth = 0;
+    for (event, range) in Parser::new(contents).into_offset_iter() {
+        let first = offsets
+            .partition_point(|start| *start <= range.start)
+            .saturating_sub(1);
+        let end = offsets.partition_point(|start| *start < range.end);
+        match event {
+            Event::Start(Tag::Heading { .. }) if item_depth == 0 => {
+                shape.headings.insert(first);
+            }
+            Event::Start(Tag::Item) => {
+                item_depth += 1;
+                if let Some(task) = lines
+                    .get(first)
+                    .and_then(|line| task_line_parts(&line.text))
+                {
+                    shape
+                        .tasks
+                        .insert(first, (task.note, end.saturating_sub(first).max(1)));
+                }
+                shape.raw.extend(first..end);
+            }
+            Event::End(TagEnd::Item) => item_depth -= 1,
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::BlockQuote(_)) => {
+                shape.raw.extend(first..end);
+            }
+            _ => {}
+        }
+    }
+    shape
+}
+
+fn heading_parts(line: &str) -> Option<(String, String, String)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let level = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = &trimmed[level..];
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let text = rest.trim_start_matches([' ', '\t']);
+    let start = line.len() - text.len();
+    let mut title = text.trim_end_matches([' ', '\t']);
+    let without_hashes = title.trim_end_matches('#');
+    if without_hashes.len() != title.len() && without_hashes.ends_with([' ', '\t']) {
+        title = without_hashes.trim_end_matches([' ', '\t']);
+    }
+    Some((
+        title.to_owned(),
+        line[..start].to_owned(),
+        line[start + title.len()..].to_owned(),
+    ))
+}
+
+struct TaskLineParts {
+    note: Note,
+    marker_start: usize,
+    marker_end: usize,
+    content_start: usize,
+}
+
+fn task_line_parts(line: &str) -> Option<TaskLineParts> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let bullet_len = if trimmed.starts_with(['-', '*', '+']) {
+        1
+    } else {
+        let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+        if !(1..=9).contains(&digits) || !trimmed[digits..].starts_with(['.', ')']) {
+            return None;
+        }
+        digits + 1
+    };
+    let rest = &trimmed[bullet_len..];
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let marker = rest.trim_start_matches([' ', '\t']);
+    let marker_start = line.len() - marker.len();
+    let inner = marker.strip_prefix('[')?.split_once(']')?.0;
+    let state = match inner {
+        "x" | "X" => NoteEnum::Done,
+        "-" => NoteEnum::Rejected,
+        value if value.chars().all(|c| matches!(c, ' ' | '\t')) => NoteEnum::Open,
+        _ => return None,
+    };
+    let marker_end = marker_start + inner.len() + 2;
+    let rest = &line[marker_end..];
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let content_start = marker_end + usize::from(!rest.is_empty());
+    Some(TaskLineParts {
+        note: Note {
+            content: line[content_start..].to_owned(),
+            state,
+        },
+        marker_start,
+        marker_end,
+        content_start,
+    })
+}
+
+fn render_task_line(template: &str, note: &Note) -> String {
+    let Some(parts) = task_line_parts(template) else {
+        return note.to_string();
+    };
+    let marker = if parts.note.state == note.state {
+        &template[parts.marker_start..parts.marker_end]
+    } else {
+        match note.state {
+            NoteEnum::Open => "[ ]",
+            NoteEnum::Done => "[x]",
+            NoteEnum::Rejected => "[-]",
+        }
+    };
+    let space = if parts.content_start > parts.marker_end {
+        &template[parts.marker_end..parts.content_start]
+    } else {
+        " "
+    };
+    format!(
+        "{}{marker}{space}{}",
+        &template[..parts.marker_start],
+        note.content
+    )
 }
 
 fn finish_source_section(
@@ -590,7 +970,9 @@ fn finish_source_section(
                 }
                 description.push_str(&block.line.text);
             }
-            SourceBlockKind::Note { index, original } => {
+            SourceBlockKind::Note {
+                index, original, ..
+            } => {
                 *index = notes.len();
                 if let Some(note) = original {
                     notes.push(note.clone());
@@ -640,22 +1022,6 @@ fn split_source_lines(contents: &str) -> Vec<SourceLine> {
     lines
 }
 
-fn parse_note_line(note_line: &str) -> Option<Note> {
-    [
-        ("[x] ", NoteEnum::Done),
-        ("[ ] ", NoteEnum::Open),
-        ("[] ", NoteEnum::Open),
-        ("[-] ", NoteEnum::Rejected),
-    ]
-    .into_iter()
-    .find_map(|(prefix, state)| {
-        note_line.strip_prefix(prefix).map(|content| Note {
-            content: content.to_owned(),
-            state,
-        })
-    })
-}
-
 fn is_raw_markdown(line: &str) -> bool {
     let trimmed = line.trim_start();
     [
@@ -673,6 +1039,79 @@ mod tests {
     use super::{parse_lines, parse_markdown, NoteEnum};
 
     #[test]
+    fn recognizes_headerless_nested_and_alternate_markers_without_reformatting() {
+        let source =
+            "intro\r\n\r\n* [X] parent\r\n  + [ ] child\r\n\r\n## Next ##\r\n1. [-] rejected\r\n";
+        let mut list = parse_markdown(source);
+        assert_eq!(list.titles, ["Inbox", "Next"]);
+        assert_eq!(list.notes[0].len(), 2);
+        assert_eq!(list.note_depth(0, 1), 2);
+        assert_eq!(list.to_string(), source);
+        list.notes[0][0].content = "renamed parent".into();
+        list.notes[0][1].state = NoteEnum::Done;
+        list.titles[1] = "Later".into();
+        assert_eq!(
+            list.to_string(),
+            source
+                .replace("parent", "renamed parent")
+                .replace("+ [ ] child", "+ [x] child")
+                .replace("## Next ##", "## Later ##")
+        );
+    }
+
+    #[test]
+    fn code_blocks_are_not_tasks_or_descriptions() {
+        let source = "# Work\nOld description\n~~~md\n## example heading\n- [ ] example task\nordinary code text\n~~~\n- [ ] real task\n";
+        let mut list = parse_markdown(source);
+        assert_eq!(list.titles, ["Work"]);
+        assert_eq!(list.notes[0].len(), 1);
+        list.descriptions[0] = "New description".into();
+        assert_eq!(
+            list.to_string(),
+            source.replace("Old description", "New description")
+        );
+    }
+
+    #[test]
+    fn reordering_moves_a_subtree_with_its_continuation_markdown() {
+        let source = "# Work\n- [ ] a\n  + [ ] child\n    continuation **text**\n- [ ] b\n";
+        let mut list = parse_markdown(source);
+        assert_eq!(list.reorder_task(0, 0, true), Some(1));
+        assert_eq!(
+            list.to_string(),
+            "# Work\n- [ ] b\n- [ ] a\n  + [ ] child\n    continuation **text**\n"
+        );
+        assert_eq!(list.reorder_task(0, 1, false), Some(0));
+        assert_eq!(list.to_string(), source);
+        assert_eq!(list.notes[0].len(), 3);
+    }
+
+    #[test]
+    fn indenting_and_outdenting_keep_subtasks_attached() {
+        let source = "# Work\n- [ ] a\n- [ ] b\n  - [ ] child\n";
+        let mut list = parse_markdown(source);
+        assert!(list.indent_task(0, 1, false));
+        assert_eq!(list.note_depth(0, 1), 2);
+        assert_eq!(list.note_depth(0, 2), 4);
+        assert!(list.indent_task(0, 1, true));
+        assert_eq!(list.to_string(), source);
+    }
+
+    #[test]
+    fn moving_between_lists_preserves_unrelated_markdown_and_target_line_endings() {
+        let mut from = parse_markdown("# Work\n- [X] parent\n  - [ ] child\n\n> untouched\n");
+        let mut to = parse_markdown("## Inbox\r\n");
+        let group = from.take_task_group(0, 0).unwrap();
+        assert!(to.insert_task_group(0, 0, group, 0));
+        assert!(from.notes[0].is_empty());
+        assert_eq!(from.to_string(), "# Work\n\n> untouched\n");
+        assert_eq!(
+            to.to_string(),
+            "## Inbox\r\n- [X] parent\r\n  - [ ] child\r\n"
+        );
+    }
+
+    #[test]
     fn preserves_unmodified_markdown_and_crlf_endings() {
         let source = "# Plans\r\nA description\r\n\r\n## Details\r\n> keep this quote\r\n- [ ] first\r\n- not a yoku task\r\n";
         assert_eq!(parse_markdown(source).to_string(), source);
@@ -683,7 +1122,7 @@ mod tests {
         let source = "# Plans\nA description\n\n## Details\n> keep this quote\n- [ ] first\n";
         let mut list = parse_markdown(source);
         list.titles[0] = "Roadmap".to_owned();
-        list.notes[0][0].state = NoteEnum::Done;
+        list.notes[1][0].state = NoteEnum::Done;
         assert_eq!(
             list.to_string(),
             "# Roadmap\nA description\n\n## Details\n> keep this quote\n- [x] first\n"

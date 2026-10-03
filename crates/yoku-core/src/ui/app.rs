@@ -578,12 +578,12 @@ impl<'a> App<'a> {
             }
             1 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    list.take_section(self.list_index);
+                    list.remove_section_tree(self.list_index);
                 }
             }
             2 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    list.remove_note(self.list_index, self.note_index);
+                    list.take_task_group(self.list_index, self.note_index);
                 }
             }
             _ => {}
@@ -1579,7 +1579,7 @@ mod tests {
         app.remove();
         assert_eq!(app.lists[0].titles, ["One"]);
         app.undo_last_delete();
-        assert_eq!(app.lists[0].titles, ["One", "Two"]);
+        assert_eq!(app.lists[0].titles, ["One", "Two", "preserved"]);
         assert!(app.lists[0].to_string().contains("## preserved"));
     }
 
