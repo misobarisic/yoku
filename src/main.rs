@@ -106,6 +106,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut to_remove,
     );
 
-    ratatui::run(|mut terminal| run_app(&mut terminal, app))?;
+    ratatui::run(|terminal| run_app(terminal, app))?;
     Ok(())
 }

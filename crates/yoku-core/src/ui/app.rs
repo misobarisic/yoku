@@ -143,20 +143,14 @@ impl<'a> App<'a> {
 
     pub fn navigate_down(&mut self) {
         match self.cursor_vertical {
-            0 => {
-                if self
-                    .lists
-                    .get(self.file_index)
-                    .is_some_and(|list| !list.titles.is_empty())
-                {
-                    self.cursor_vertical = 1;
-                }
+            0 if self
+                .lists
+                .get(self.file_index)
+                .is_some_and(|list| !list.titles.is_empty()) =>
+            {
+                self.cursor_vertical = 1;
             }
-            1 => {
-                if !self.selected_notes().is_empty() {
-                    self.cursor_vertical = 2;
-                }
-            }
+            1 if !self.selected_notes().is_empty() => self.cursor_vertical = 2,
             2 => self.next_note(),
             _ => {}
         }

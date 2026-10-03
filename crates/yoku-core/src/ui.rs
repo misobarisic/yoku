@@ -11,9 +11,14 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
     Frame, Terminal,
 };
-use std::io;
 
-pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App<'_>) -> io::Result<()> {
+pub fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    mut app: App<'_>,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    B::Error: 'static,
+{
     loop {
         terminal.draw(|frame| ui(frame, &mut app))?;
 
@@ -41,7 +46,7 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App<'_>) -> io::
                     return if key.modifiers == KeyModifiers::CONTROL {
                         Ok(())
                     } else {
-                        app.save()
+                        Ok(app.save()?)
                     };
                 }
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
@@ -49,16 +54,12 @@ pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App<'_>) -> io::
                 KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('h') => app.previous(),
                 KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k') => app.navigate_up(),
                 KeyCode::Down | KeyCode::Char('s') | KeyCode::Char('j') => app.navigate_down(),
-                KeyCode::Esc => {
-                    if app.cursor_vertical == 2 {
-                        app.note_index = 0;
-                        app.navigate_up();
-                    }
+                KeyCode::Esc if app.cursor_vertical == 2 => {
+                    app.note_index = 0;
+                    app.navigate_up();
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    if app.cursor_vertical == 2 {
-                        app.cycle_note_state();
-                    }
+                KeyCode::Enter | KeyCode::Char(' ') if app.cursor_vertical == 2 => {
+                    app.cycle_note_state();
                 }
                 KeyCode::Char('x' | '+') if app.cursor_vertical == 2 => {
                     app.set_note_state(NoteEnum::Done);
