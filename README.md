@@ -44,7 +44,19 @@ Please make sure to update tests as appropriate.
 
 ## Data
 
-The default data directory depends on your platform. Print it with `yoku --data-path`, or choose a different directory with `yoku --path ./todos`. Yoku reads Markdown (`.md`) files from that directory.
+The default data directory depends on your platform. Print it with `yoku --data-path`, or choose a different directory with `yoku --main-path ./todos`. Yoku reads Markdown (`.md`) files from that directory and preserves Markdown it does not edit.
+
+## Keyboard shortcuts
+
+- Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.
+- Press `Enter`, `Space`, `x`, `+`, or `-` to change the selected task state.
+- Press `e` to edit the selected file name, list title, or task. Press `Ctrl+E` to edit a list description.
+- Press `u` to create a file, `i` to create a list, and `o` to create a task.
+- Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` restores the last deletion until the next successful save.
+- Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
+- Press `?` or `F1` for the in-app help.
+- Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
+- In an editor, use Left/Right, Home/End, Backspace, and Delete to move and edit text. Cursor movement treats accented letters and emoji as whole graphemes.
 
 ---
 
