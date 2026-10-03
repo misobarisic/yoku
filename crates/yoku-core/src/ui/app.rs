@@ -1170,6 +1170,67 @@ mod tests {
     }
 
     #[test]
+    fn reloading_an_external_edit_discards_only_the_conflicted_file_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = "# Work\n- [ ] task\n";
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), original);
+        let target = paths[0].clone();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.lists[0].notes[0][0].content = "local edit".into();
+        fs::write(&target, "# Work\n- [ ] external edit\n").unwrap();
+        app.lists
+            .push(parse_markdown("# Another\n- [ ] local edit\n"));
+        app.files.push("another".into());
+        app.paths.push(directory.path().join("another.md"));
+
+        assert!(!app.save().unwrap());
+        app.reload_conflict().unwrap();
+        assert_eq!(app.lists[0].notes[0][0].content, "external edit");
+        assert_eq!(app.lists[1].notes[0][0].content, "local edit");
+        assert_eq!(
+            fs::read_to_string(target).unwrap(),
+            "# Work\n- [ ] external edit\n"
+        );
+    }
+
+    #[test]
+    fn reloading_a_deleted_file_cancels_the_delete_without_duplicate_undo() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let target = paths[0].clone();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.remove();
+        app.confirm_file_delete();
+        fs::write(&target, "# Work\n- [ ] external task\n").unwrap();
+
+        assert!(!app.save().unwrap());
+        app.reload_conflict().unwrap();
+        assert_eq!(app.paths.len(), 1);
+        assert_eq!(app.lists[0].notes[0][0].content, "external task");
+        app.undo_last_delete();
+        assert_eq!(app.paths.len(), 1);
+        assert!(app.save().unwrap());
+    }
+
+    #[test]
     fn new_file_collision_is_never_overwritten_without_confirmation() {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("new.md");

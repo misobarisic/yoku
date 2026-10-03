@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -205,7 +205,7 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     }
 
     let editing = app.mode != EditorMode::Nothing;
-    let minimum_height = if editing { 13 } else { 10 };
+    let minimum_height = if editing { 15 } else { 12 };
     if area.width < 20 || area.height < minimum_height {
         render_compact(frame, area, app);
         render_status(frame, area, app);
@@ -243,12 +243,14 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     };
 
     let current_list = app.lists.get(app.file_index).unwrap_or(EMPTY_LIST);
-    let mut list_tabs = Tabs::new(make_tab_items(&current_list.titles))
+    let (list_items, selected_list) = make_visible_tab_items(
+        &current_list.titles,
+        app.list_index,
+        chunks[1].width.saturating_sub(2) as usize,
+    );
+    let mut list_tabs = Tabs::new(list_items)
         .block(Block::default().borders(Borders::ALL).title("Lists"))
-        .select(
-            app.list_index
-                .min(current_list.titles.len().saturating_sub(1)),
-        )
+        .select(selected_list)
         .style(Style::default().fg(Color::Cyan));
     if app.cursor_vertical == 1 {
         list_tabs = list_tabs.highlight_style(
@@ -259,9 +261,14 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     }
     frame.render_widget(list_tabs, chunks[1]);
 
-    let mut file_tabs = Tabs::new(make_tab_items(app.files))
+    let (file_items, selected_file) = make_visible_tab_items(
+        app.files,
+        app.file_index,
+        chunks[0].width.saturating_sub(2) as usize,
+    );
+    let mut file_tabs = Tabs::new(file_items)
         .block(Block::default().borders(Borders::ALL).title("Files"))
-        .select(app.file_index.min(app.files.len().saturating_sub(1)))
+        .select(selected_file)
         .style(Style::default().fg(Color::Cyan));
     if app.cursor_vertical == 0 {
         file_tabs = file_tabs.highlight_style(
@@ -276,16 +283,35 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         .notes
         .get(app.list_index)
         .unwrap_or(EMPTY_NOTE_VEC);
+    let note_capacity = chunks[2].height.saturating_sub(2).max(1) as usize;
+    let note_start = if notes.len() > note_capacity && app.cursor_vertical == 2 {
+        app.note_index
+            .saturating_sub(note_capacity / 2)
+            .min(notes.len() - note_capacity)
+    } else {
+        0
+    };
     let items = notes
         .iter()
         .enumerate()
+        .skip(note_start)
+        .take(note_capacity)
         .map(|(index, note)| {
-            let content = if index == app.note_index && app.cursor_vertical == 2 {
-                note.to_string_custom(">")
-            } else {
-                note.to_string()
+            let prefix = match note.state {
+                NoteEnum::Open => "[ ] ",
+                NoteEnum::Done => "[x] ",
+                NoteEnum::Rejected => "[-] ",
             };
-            ListItem::new(Line::from(content)).style(Style::default().fg(Color::White))
+            let marker = if index == app.note_index && app.cursor_vertical == 2 {
+                "> "
+            } else {
+                "- "
+            };
+            ListItem::new(Line::from(vec![
+                Span::raw(format!("{marker}{prefix}")),
+                Span::raw(note.content.as_str()),
+            ]))
+            .style(Style::default().fg(Color::White))
         })
         .collect::<Vec<_>>();
     let description = current_list
@@ -300,7 +326,11 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         );
-    frame.render_stateful_widget(note_list, chunks[2], &mut app.notes_state);
+    let mut visible_note_state = ListState::default();
+    if app.cursor_vertical == 2 && !notes.is_empty() {
+        visible_note_state.select(Some(app.note_index.saturating_sub(note_start)));
+    }
+    frame.render_stateful_widget(note_list, chunks[2], &mut visible_note_state);
 
     if app.mode != EditorMode::Nothing {
         let input_width = chunks[3].width.saturating_sub(2) as usize;
@@ -494,6 +524,94 @@ pub fn make_tab_items(values: &[String]) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn make_visible_tab_items(
+    values: &[String],
+    selected: usize,
+    available_width: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    if values.is_empty() || available_width == 0 {
+        return (Vec::new(), None);
+    }
+    let selected = selected.min(values.len() - 1);
+    let max_label_width = available_width.saturating_sub(2).clamp(1, 24);
+    let item_width =
+        |index: usize| UnicodeWidthStr::width(values[index].as_str()).min(max_label_width) + 2;
+    let mut start = selected;
+    let mut end = selected + 1;
+    let mut used_width = item_width(selected);
+    let mut prefer_left = true;
+    loop {
+        let mut added = false;
+        for left_first in [prefer_left, !prefer_left] {
+            let candidate = if left_first {
+                start.checked_sub(1)
+            } else if end < values.len() {
+                Some(end)
+            } else {
+                None
+            };
+            let Some(candidate) = candidate else {
+                continue;
+            };
+            let new_width = used_width + item_width(candidate) + 1;
+            if new_width <= available_width {
+                if candidate < start {
+                    start = candidate;
+                } else {
+                    end += 1;
+                }
+                used_width = new_width;
+                added = true;
+                break;
+            }
+        }
+        if !added {
+            break;
+        }
+        prefer_left = !prefer_left;
+    }
+
+    let items = values[start..end]
+        .iter()
+        .map(|value| make_tab_line(&truncate_tab(value, max_label_width)))
+        .collect();
+    (items, Some(selected - start))
+}
+
+fn truncate_tab(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let target_width = max_width.saturating_sub(1);
+    let mut output = String::new();
+    let mut width = 0;
+    for grapheme in value.graphemes(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if width + grapheme_width > target_width {
+            break;
+        }
+        output.push_str(grapheme);
+        width += grapheme_width;
+    }
+    output.push('…');
+    output
+}
+
+fn make_tab_line(value: &str) -> Line<'static> {
+    let split_at = value
+        .grapheme_indices(true)
+        .nth(1)
+        .map_or(value.len(), |(index, _)| index);
+    let (first, rest) = value.split_at(split_at);
+    Line::from(vec![
+        Span::styled(first.to_owned(), Style::default().fg(Color::Yellow)),
+        Span::styled(rest.to_owned(), Style::default().fg(Color::Green)),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{make_tab_items, ui};
@@ -564,6 +682,63 @@ mod tests {
         let tabs = make_tab_items(&["👩‍💻 tools".to_owned()]);
         assert_eq!(tabs[0].spans[0].content, "👩‍💻");
         assert_eq!(tabs[0].spans[1].content, " tools");
+    }
+
+    #[test]
+    fn selected_tab_stays_in_the_visible_window() {
+        let names = (0..40)
+            .map(|index| format!("long tab {index} {}", "界".repeat(20)))
+            .collect::<Vec<_>>();
+        let (visible, selected) = super::make_visible_tab_items(&names, 39, 25);
+        let visible_text = visible
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(visible.len() < names.len());
+        assert!(visible_text.contains("39"));
+        assert!(selected.is_some_and(|index| index < visible.len()));
+    }
+
+    #[test]
+    fn large_task_lists_render_the_selected_task_into_the_viewport() {
+        let mut files = vec!["work".into()];
+        let mut paths = vec![std::path::PathBuf::from("work.md")];
+        let mut lists = vec![FileList::from_parts(
+            vec!["Tasks".into()],
+            vec![String::new()],
+            vec![(0..500)
+                .map(|index| Note {
+                    content: format!("task {index}"),
+                    state: NoteEnum::Open,
+                })
+                .collect()],
+        )];
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            std::path::Path::new("."),
+            &mut removed,
+        );
+        app.note_index = 499;
+        app.cursor_vertical = 2;
+        let mut terminal = Terminal::new(TestBackend::new(40, 15)).unwrap();
+        terminal.draw(|frame| ui(frame, &mut app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(text.contains("task 499"));
     }
 
     #[test]

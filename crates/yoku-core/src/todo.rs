@@ -511,7 +511,11 @@ pub fn extract_naked_filename(path: &Path) -> io::Result<String> {
 }
 
 pub fn parse_lines(lines: Vec<String>) -> FileList {
-    parse_markdown(&lines.join("\n"))
+    if lines.is_empty() {
+        FileList::default()
+    } else {
+        parse_markdown(&format!("{}\n", lines.join("\n")))
+    }
 }
 
 pub fn parse_markdown(contents: &str) -> FileList {
@@ -607,20 +611,24 @@ fn split_source_lines(contents: &str) -> Vec<SourceLine> {
     }
     let mut lines = Vec::new();
     let mut start = 0;
-    for (index, byte) in contents.bytes().enumerate() {
-        if byte == b'\n' {
-            let mut end = index;
-            let ending = if end > start && contents.as_bytes()[end - 1] == b'\r' {
-                end -= 1;
-                "\r\n"
-            } else {
-                "\n"
-            };
+    let bytes = contents.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let ending = match bytes[index] {
+            b'\n' => Some((index, index + 1, "\n")),
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => Some((index, index + 2, "\r\n")),
+            b'\r' => Some((index, index + 1, "\r")),
+            _ => None,
+        };
+        if let Some((line_end, next_start, ending)) = ending {
             lines.push(SourceLine {
-                text: contents[start..end].to_owned(),
+                text: contents[start..line_end].to_owned(),
                 ending: ending.to_owned(),
             });
-            start = index + 1;
+            start = next_start;
+            index = next_start;
+        } else {
+            index += 1;
         }
     }
     if start < contents.len() {
@@ -662,7 +670,7 @@ fn is_raw_markdown(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_markdown, NoteEnum};
+    use super::{parse_lines, parse_markdown, NoteEnum};
 
     #[test]
     fn preserves_unmodified_markdown_and_crlf_endings() {
@@ -716,5 +724,19 @@ mod tests {
     fn preserves_missing_final_newline() {
         let source = "# One\n- [ ] task";
         assert_eq!(parse_markdown(source).to_string(), source);
+    }
+
+    #[test]
+    fn preserves_bare_carriage_return_line_endings() {
+        let source = "# One\r- [ ] task\r";
+        let mut list = parse_markdown(source);
+        list.notes[0][0].state = NoteEnum::Done;
+        assert_eq!(list.to_string(), "# One\r- [x] task\r");
+    }
+
+    #[test]
+    fn parse_lines_keeps_the_legacy_newline_terminated_output() {
+        let list = parse_lines(vec!["# One".into(), "- [ ] task".into()]);
+        assert_eq!(list.to_string(), "# One\n- [ ] task\n");
     }
 }
