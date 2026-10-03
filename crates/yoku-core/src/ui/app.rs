@@ -1,7 +1,7 @@
 use crate::query::{
     sort_tasks, DueFilter, TaskCounts, TaskCriteria, TaskFilter, TaskLocation, TaskSort, TaskView,
 };
-use crate::storage::valid_file_stem;
+use crate::storage::{markdown_files, valid_file_stem};
 use crate::todo::{parse_markdown, FileList, Note, NoteEnum};
 use crate::util::calculate_hash;
 use chrono::{Local, NaiveDate};
@@ -65,6 +65,20 @@ pub struct MovePicker {
     pub index: usize,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RefreshReport {
+    pub updated: usize,
+    pub added: usize,
+    pub removed: usize,
+    pub conflicts: usize,
+}
+
+impl RefreshReport {
+    pub fn changed(&self) -> bool {
+        self.updated + self.added + self.removed > 0
+    }
+}
+
 pub struct App<'a> {
     pub main_path: &'a Path,
     pub files: &'a mut Vec<String>,
@@ -87,6 +101,7 @@ pub struct App<'a> {
     pub pending_file_delete: Option<usize>,
     pub confirm_discard: bool,
     pub show_help: bool,
+    pub help_scroll: u16,
     pub search_query: String,
     pub quit_after_save: bool,
     pub move_picker: Option<MovePicker>,
@@ -95,6 +110,8 @@ pub struct App<'a> {
     pub task_sort: TaskSort,
     pub criteria: TaskCriteria,
     pub filter_query: String,
+    pub editor_requested: bool,
+    external_changes: HashSet<PathBuf>,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
@@ -137,6 +154,7 @@ impl<'a> App<'a> {
             pending_file_delete: None,
             confirm_discard: false,
             show_help: false,
+            help_scroll: 0,
             search_query: String::new(),
             quit_after_save: false,
             move_picker: None,
@@ -145,6 +163,8 @@ impl<'a> App<'a> {
             task_sort: TaskSort::Document,
             criteria: TaskCriteria::default(),
             filter_query: String::new(),
+            editor_requested: false,
+            external_changes: HashSet::new(),
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
@@ -694,6 +714,7 @@ impl<'a> App<'a> {
         }
         self.to_remove.clear();
         self.renamed_from.clear();
+        self.external_changes.clear();
         Ok(true)
     }
 
@@ -710,6 +731,120 @@ impl<'a> App<'a> {
     pub fn request_save(&mut self, quit: bool) -> io::Result<bool> {
         self.quit_after_save = quit;
         self.retry_save()
+    }
+
+    pub fn begin_external_edit(&mut self) -> io::Result<()> {
+        if self.paths.get(self.file_index).is_none() {
+            self.status_message = Some("Create a file before opening an external editor".into());
+            return Ok(());
+        }
+        self.editor_requested = true;
+        if let Err(error) = self.request_save(false) {
+            self.editor_requested = false;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Refresh clean files only; local edits keep their original disk baseline.
+    pub fn refresh(&mut self) -> io::Result<RefreshReport> {
+        if !fs::metadata(self.main_path)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "The data directory is no longer a directory",
+            ));
+        }
+        // Read before applying any updates, so an unreadable file cannot cause a partial reload.
+        let incoming = markdown_files(self.main_path)?
+            .into_iter()
+            .map(|path| {
+                let name = crate::todo::extract_naked_filename(&path)?;
+                let contents = fs::read_to_string(&path)?;
+                let hash = calculate_hash(&contents.as_bytes());
+                Ok((path, name, contents, hash))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let incoming_paths = incoming
+            .iter()
+            .map(|(path, _, _, _)| path.clone())
+            .collect::<HashSet<_>>();
+        let selected = self.paths.get(self.file_index).cloned();
+        let mut report = RefreshReport::default();
+        let mut conflicts = HashSet::new();
+        for (path, name, contents, hash) in incoming {
+            if self.to_remove.contains(&path) {
+                if self.disk_hashes.get(&path).copied() != Some(hash) {
+                    conflicts.insert(path);
+                }
+                continue;
+            }
+            if let Some(index) = self.paths.iter().position(|active| active == &path) {
+                if self.file_is_dirty(index) {
+                    if self.disk_hashes.get(&path).copied() != Some(hash) {
+                        conflicts.insert(path);
+                    }
+                } else if self.disk_hashes.get(&path).copied() != Some(hash) {
+                    let list = parse_markdown(&contents);
+                    self.hashes.insert(path.clone(), calculate_hash(&list));
+                    self.disk_hashes.insert(path, hash);
+                    self.lists[index] = list;
+                    report.updated += 1;
+                }
+            } else {
+                let list = parse_markdown(&contents);
+                self.files.push(name);
+                self.hashes.insert(path.clone(), calculate_hash(&list));
+                self.disk_hashes.insert(path.clone(), hash);
+                self.paths.push(path);
+                self.lists.push(list);
+                report.added += 1;
+            }
+        }
+        for index in (0..self.paths.len()).rev() {
+            let path = &self.paths[index];
+            if incoming_paths.contains(path) || !self.disk_hashes.contains_key(path) {
+                continue;
+            }
+            if self.file_is_dirty(index) {
+                conflicts.insert(path.clone());
+            } else {
+                let path = self.paths.remove(index);
+                self.files.remove(index);
+                self.lists.remove(index);
+                self.hashes.remove(&path);
+                self.disk_hashes.remove(&path);
+                report.removed += 1;
+            }
+        }
+        report.conflicts = conflicts.len();
+        if report.changed() {
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+            self.search_matches.clear();
+            self.search_index = None;
+        }
+        if report.changed() || conflicts != self.external_changes {
+            self.status_message = Some(format!(
+                "Refreshed: {} updated, {} added, {} removed; {} edited paths changed externally{}",
+                report.updated,
+                report.added,
+                report.removed,
+                report.conflicts,
+                if report.conflicts > 0 {
+                    "; Ctrl+S resolves conflicts"
+                } else {
+                    ""
+                }
+            ));
+        }
+        self.external_changes = conflicts;
+        if let Some(index) =
+            selected.and_then(|path| self.paths.iter().position(|active| active == &path))
+        {
+            self.file_index = index;
+        }
+        self.validate_and_update_indices();
+        Ok(report)
     }
 
     pub fn retry_save(&mut self) -> io::Result<bool> {
@@ -818,6 +953,7 @@ impl<'a> App<'a> {
     pub fn cancel_conflict(&mut self) {
         self.save_conflict = None;
         self.quit_after_save = false;
+        self.editor_requested = false;
         self.status_message =
             Some("Save canceled; your in-memory edits are still available".into());
     }
@@ -1478,6 +1614,139 @@ mod tests {
         app.disk_hashes
             .insert(path, calculate_hash(&contents.as_bytes()));
         app.lists.push(list);
+    }
+
+    #[test]
+    fn refresh_updates_clean_files_discovers_files_and_handles_external_deletion() {
+        with_app("# Work\n- [ ] old task\n", |app, root| {
+            add_test_file(app, root, "personal", "# Inbox\n- [ ] removed\n");
+            app.file_index = 1;
+            fs::write(root.join("todos.md"), "# Work\n- [ ] changed task\n").unwrap();
+            fs::write(root.join("new.MD"), "- [ ] discovered\n").unwrap();
+            fs::remove_file(root.join("personal.md")).unwrap();
+            let report = app.refresh().unwrap();
+            assert_eq!(
+                report,
+                super::RefreshReport {
+                    updated: 1,
+                    added: 1,
+                    removed: 1,
+                    conflicts: 0
+                }
+            );
+            assert_eq!(app.lists[0].notes[0][0].content, "changed task");
+            assert_eq!(app.lists[1].notes[0][0].content, "discovered");
+            assert!(!app.has_unsaved_changes());
+            assert!(!app.refresh().unwrap().changed());
+        });
+    }
+
+    #[test]
+    fn refresh_keeps_local_edits_and_the_save_conflict_baseline() {
+        with_app("# Work\n- [ ] original\n", |app, root| {
+            app.cycle_note_state();
+            fs::write(root.join("todos.md"), "# Work\n- [ ] external\n").unwrap();
+            let report = app.refresh().unwrap();
+            assert_eq!(report.conflicts, 1);
+            assert!(!report.changed());
+            assert_eq!(app.lists[0].notes[0][0].content, "original");
+            assert!(!app.save().unwrap());
+            assert_eq!(
+                app.save_conflict.as_ref().unwrap().kind,
+                SaveConflictKind::ExternalEdit
+            );
+            app.undo();
+            assert_eq!(app.lists[0].notes[0][0].state, crate::todo::NoteEnum::Open);
+        });
+    }
+
+    #[test]
+    fn refresh_retains_unsaved_files_and_does_not_revive_pending_deletions() {
+        with_app("# Work\n- [ ] original\n", |app, _| {
+            app.remove();
+            app.confirm_file_delete();
+            assert!(app.paths.is_empty());
+            assert!(!app.refresh().unwrap().changed());
+            assert!(app.paths.is_empty());
+            app.undo();
+            app.create_file();
+            app.set_input("new".into());
+            app.handle_enter();
+            assert!(!app.refresh().unwrap().changed());
+            assert_eq!(app.paths.len(), 2);
+            assert!(app.file_is_dirty(1));
+        });
+    }
+
+    #[test]
+    fn refresh_of_a_missing_dirty_file_preserves_edits_for_explicit_resolution() {
+        with_app("# Work\n- [ ] original\n", |app, root| {
+            app.cycle_note_state();
+            fs::remove_file(root.join("todos.md")).unwrap();
+            assert_eq!(app.refresh().unwrap().conflicts, 1);
+            assert_eq!(app.paths.len(), 1);
+            assert!(!app.save().unwrap());
+            assert_eq!(
+                app.save_conflict.as_ref().unwrap().kind,
+                SaveConflictKind::MissingFile
+            );
+        });
+    }
+
+    #[test]
+    fn refresh_errors_cannot_partially_replace_the_workspace() {
+        with_app("# Work\n- [ ] original\n", |app, root| {
+            fs::write(root.join("todos.md"), "# Work\n- [ ] external\n").unwrap();
+            fs::write(root.join("zz-invalid.md"), [0xff]).unwrap();
+            assert!(app.refresh().is_err());
+            assert_eq!(app.lists[0].notes[0][0].content, "original");
+            fs::remove_file(root.join("zz-invalid.md")).unwrap();
+            fs::remove_file(root.join("todos.md")).unwrap();
+            fs::remove_dir(root).unwrap();
+            assert!(app.refresh().is_err());
+            assert_eq!(app.paths.len(), 1);
+        });
+    }
+
+    #[test]
+    fn external_edit_saves_first_and_cancellation_clears_the_pending_editor() {
+        with_app("# Work\n- [ ] original\n", |app, root| {
+            app.cycle_note_state();
+            app.begin_external_edit().unwrap();
+            assert!(app.editor_requested);
+            assert!(!app.has_unsaved_changes());
+            assert!(fs::read_to_string(root.join("todos.md"))
+                .unwrap()
+                .contains("[x]"));
+            app.editor_requested = false;
+            app.cycle_note_state();
+            fs::write(root.join("todos.md"), "# Work\n- [ ] external\n").unwrap();
+            app.begin_external_edit().unwrap();
+            assert!(app.save_conflict.is_some());
+            app.cancel_conflict();
+            assert!(!app.editor_requested);
+            assert!(app.has_unsaved_changes());
+        });
+    }
+
+    #[test]
+    fn help_can_scroll_to_the_end_in_a_small_terminal() {
+        with_app("# Work\n- [ ] task\n", |app, _| {
+            app.show_help = true;
+            app.help_scroll = u16::MAX;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(35, 12)).unwrap();
+            terminal.draw(|frame| crate::ui::ui(frame, app)).unwrap();
+            assert!(app.help_scroll > 0 && app.help_scroll < u16::MAX);
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(text.contains("Esc closes"));
+        });
     }
 
     #[test]

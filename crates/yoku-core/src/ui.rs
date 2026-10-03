@@ -1,4 +1,5 @@
 pub mod app;
+mod editor;
 
 use crate::query::TaskView;
 use crate::todo::NoteEnum;
@@ -12,6 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
     Frame, Terminal,
 };
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -22,8 +24,46 @@ pub fn run_app<B: Backend>(
 where
     B::Error: 'static,
 {
+    let mut refreshed_at = Instant::now();
     loop {
+        if app.editor_requested && app.save_conflict.is_none() && !app.has_unsaved_changes() {
+            app.editor_requested = false;
+            if let Some(path) = app.paths.get(app.file_index).cloned() {
+                let editor_result = editor::edit_file(terminal, &path);
+                let refresh_result = app.refresh();
+                match (editor_result, refresh_result) {
+                    (Err(error), _) => {
+                        app.status_message = Some(format!("Could not edit file: {error}"))
+                    }
+                    (_, Err(error)) => {
+                        app.status_message =
+                            Some(format!("Could not reload editor changes: {error}"))
+                    }
+                    (Ok(()), Ok(report)) if !report.changed() => {
+                        app.status_message = Some("Editor closed; no file changes".into())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if refreshed_at.elapsed() >= Duration::from_secs(2)
+            && app.mode == EditorMode::Nothing
+            && app.save_conflict.is_none()
+            && app.move_picker.is_none()
+            && app.pending_file_delete.is_none()
+            && !app.confirm_discard
+            && !app.show_help
+        {
+            if let Err(error) = app.refresh() {
+                app.status_message = Some(format!("Refresh failed: {error}"));
+            }
+            refreshed_at = Instant::now();
+        }
         terminal.draw(|frame| ui(frame, &mut app))?;
+
+        if !event::poll(Duration::from_secs(1))? {
+            continue;
+        }
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -33,8 +73,19 @@ where
         }
 
         if app.show_help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?')) {
-                app.show_help = false;
+            match key.code {
+                KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') => app.show_help = false,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.help_scroll = app.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.help_scroll = app.help_scroll.saturating_add(1)
+                }
+                KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+                KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
+                KeyCode::Home => app.help_scroll = 0,
+                KeyCode::End => app.help_scroll = u16::MAX,
+                _ => {}
             }
             continue;
         }
@@ -84,6 +135,10 @@ where
                     if let Err(error) = app.reload_conflict() {
                         app.save_conflict = Some(conflict);
                         app.status_message = Some(format!("Could not reload file: {error}"));
+                    } else if app.editor_requested {
+                        if let Err(error) = app.begin_external_edit() {
+                            app.status_message = Some(format!("Save failed: {error}"));
+                        }
                     }
                 }
                 KeyCode::Esc => app.cancel_conflict(),
@@ -127,7 +182,29 @@ where
                 KeyCode::Char('S') => app.cycle_task_sort(),
                 KeyCode::Char('t') => app.show_agenda(false),
                 KeyCode::Char('v') => app.show_agenda(true),
-                KeyCode::Char('?') | KeyCode::F(1) => app.show_help = true,
+                KeyCode::Char('E') => {
+                    if let Err(error) = app.begin_external_edit() {
+                        app.status_message = Some(format!("Save failed: {error}"));
+                    }
+                }
+                KeyCode::Char('R') => match app.refresh() {
+                    Ok(report) if !report.changed() => {
+                        app.status_message = Some(
+                            if report.conflicts > 0 {
+                                "Edited files changed externally; Ctrl+S resolves conflicts"
+                            } else {
+                                "No external changes; local edits kept"
+                            }
+                            .into(),
+                        )
+                    }
+                    Err(error) => app.status_message = Some(format!("Refresh failed: {error}")),
+                    _ => {}
+                },
+                KeyCode::Char('?') | KeyCode::F(1) => {
+                    app.show_help = true;
+                    app.help_scroll = 0;
+                }
                 KeyCode::Char('n') => app.search_next(true),
                 KeyCode::Char('N') => app.search_next(false),
                 KeyCode::Char('o') => app.create_note(),
@@ -239,7 +316,7 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         return;
     }
     if app.show_help {
-        render_help(frame, area);
+        render_help(frame, area, app);
         return;
     }
     if app.move_picker.is_some() {
@@ -616,24 +693,72 @@ fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
+fn render_help(frame: &mut Frame<'_>, area: Rect, app: &mut App<'_>) {
     let width = area.width.min(72);
-    let height = area.height.min(20);
+    let height = area.height.min(32);
     let rect = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  f cycles states; g toggles all files; F filters tags/text/metadata.\n  S sorts by document/priority/due; t shows Today, v shows Overdue.\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  f cycles states; g toggles all files; F filters tags/text/metadata.\n  S sorts by document/priority/due; t shows Today, v shows Overdue.\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  E opens the selected file in VISUAL/EDITOR after saving. R refreshes files.\n  External changes refresh clean files automatically; local edits stay available.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let rows = wrap_help_text(help, width.saturating_sub(2) as usize);
+    let maximum = rows.len().saturating_sub(height.saturating_sub(2) as usize);
+    let paragraph = Paragraph::new(rows.into_iter().map(Line::from).collect::<Vec<_>>());
+    app.help_scroll = app.help_scroll.min(maximum.min(u16::MAX as usize) as u16);
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(help)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Yoku help"))
+        paragraph
+            .scroll((app.help_scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Help: Up/Down scroll, Esc closes"),
+            )
             .style(Style::default().fg(Color::White)),
         rect,
     );
+}
+
+fn wrap_help_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let indent = " "
+            .repeat(line.len() - line.trim_start().len())
+            .chars()
+            .take(width.saturating_sub(1))
+            .collect::<String>();
+        let mut row = indent.clone();
+        let mut cells = indent.len();
+        for word in line.split_whitespace() {
+            let word_width = UnicodeWidthStr::width(word);
+            if cells > indent.len() && cells + 1 + word_width > width {
+                rows.push(row);
+                row = indent.clone();
+                cells = indent.len();
+            }
+            if cells > indent.len() {
+                row.push(' ');
+                cells += 1;
+            }
+            for grapheme in word.graphemes(true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if cells > indent.len() && cells + grapheme_width > width {
+                    rows.push(row);
+                    row = indent.clone();
+                    cells = indent.len();
+                }
+                row.push_str(grapheme);
+                cells += grapheme_width;
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn render_move_picker(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {

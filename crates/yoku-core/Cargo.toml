@@ -13,3 +13,4 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 pulldown-cmark.workspace = true
 chrono.workspace = true
+shell-words.workspace = true

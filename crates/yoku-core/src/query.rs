@@ -127,6 +127,13 @@ impl TaskCriteria {
     }
 
     pub fn accepts(&self, note: &Note, today: NaiveDate) -> bool {
+        if self.tags.is_empty()
+            && self.priority.is_none()
+            && self.due.is_none()
+            && self.text.is_empty()
+        {
+            return true;
+        }
         let metadata = note.metadata();
         self.tags.iter().all(|wanted| {
             metadata
