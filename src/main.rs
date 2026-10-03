@@ -1,27 +1,29 @@
+mod cli;
+
 use clap::Parser;
 use dirs::{data_dir, home_dir};
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use yoku_core::todo::{
-    extract_naked_filename, parse_markdown, FileList, MAIN_DIR, STARTER_FILE, STARTER_FILE_CONTENT,
-};
+use yoku_core::storage::{markdown_files, Workspace};
+use yoku_core::todo::{MAIN_DIR, STARTER_FILE, STARTER_FILE_CONTENT};
 use yoku_core::ui::app::App;
 use yoku_core::ui::run_app;
-use yoku_core::util::calculate_hash;
 
 #[derive(Debug, Parser)]
 #[command(name = "yoku", version, about = "TUI Markdown Todo")]
 struct Opt {
     /// Specify a custom data directory.
-    #[arg(short, long, value_name = "PATH")]
+    #[arg(short, long, global = true, value_name = "PATH")]
     main_path: Option<PathBuf>,
 
     /// Print the default data directory and exit.
     #[arg(short = 'd', long = "data-path")]
     check_path: bool,
+
+    #[command(subcommand)]
+    command: Option<cli::Command>,
 }
 
 fn default_data_path() -> io::Result<PathBuf> {
@@ -29,25 +31,6 @@ fn default_data_path() -> io::Result<PathBuf> {
         io::Error::new(io::ErrorKind::NotFound, "could not find a data directory")
     })?;
     Ok(base_path.join(MAIN_DIR))
-}
-
-fn markdown_files(data_path: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(data_path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-            {
-                paths.push(path);
-            }
-        }
-    }
-    paths.sort();
-    Ok(paths)
 }
 
 fn create_starter_file(path: &Path) -> io::Result<()> {
@@ -60,13 +43,21 @@ fn create_starter_file(path: &Path) -> io::Result<()> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opt = Opt::parse();
-    let default_path = default_data_path()?;
     if opt.check_path {
-        println!("Default data path: {}", default_path.display());
+        println!("Default data path: {}", default_data_path()?.display());
         return Ok(());
     }
 
-    let main_path = opt.main_path.unwrap_or(default_path);
+    let main_path = match opt.main_path {
+        Some(path) => path,
+        None => default_data_path()?,
+    };
+    if let Some(command) = opt.command {
+        return match cli::run(command, &main_path) {
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            result => result.map_err(Into::into),
+        };
+    }
     if main_path.exists() && !main_path.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotADirectory,
@@ -76,37 +67,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     fs::create_dir_all(&main_path)?;
 
-    let mut paths = markdown_files(&main_path)?;
-    if paths.is_empty() {
+    if markdown_files(&main_path)?.is_empty() {
         create_starter_file(&main_path.join(STARTER_FILE))?;
-        paths = markdown_files(&main_path)?;
     }
-
-    let mut files = Vec::with_capacity(paths.len());
-    let mut lists: Vec<FileList> = Vec::with_capacity(paths.len());
-    let mut disk_hashes = HashMap::with_capacity(paths.len());
-    for path in &paths {
-        let contents = fs::read_to_string(path)?;
-        files.push(extract_naked_filename(path)?);
-        disk_hashes.insert(path.clone(), calculate_hash(&contents.as_bytes()));
-        lists.push(parse_markdown(&contents));
-    }
-
-    let mut hashes: HashMap<PathBuf, u64> = paths
-        .iter()
-        .zip(&lists)
-        .map(|(path, list)| (path.clone(), calculate_hash(list)))
-        .collect();
-    let mut to_remove = Vec::new();
-
+    let mut workspace = Workspace::load(&main_path)?;
     let app = App::new(
-        &mut files,
-        &mut paths,
-        &mut lists,
-        &mut hashes,
-        &mut disk_hashes,
+        &mut workspace.files,
+        &mut workspace.paths,
+        &mut workspace.lists,
+        &mut workspace.hashes,
+        &mut workspace.disk_hashes,
         &main_path,
-        &mut to_remove,
+        &mut workspace.removed,
     );
 
     ratatui::run(|terminal| run_app(terminal, app))?;

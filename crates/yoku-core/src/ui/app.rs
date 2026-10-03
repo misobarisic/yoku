@@ -1,8 +1,6 @@
 use crate::query::{TaskCounts, TaskFilter, TaskLocation, TaskView};
-use crate::todo::{
-    parse_markdown, FileList, Note, NoteEnum, STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE,
-    STARTER_FILE_TITLE,
-};
+use crate::storage::valid_file_stem;
+use crate::todo::{parse_markdown, FileList, Note, NoteEnum};
 use crate::util::calculate_hash;
 use ratatui::widgets::ListState;
 use std::collections::{HashMap, HashSet};
@@ -1188,12 +1186,9 @@ impl<'a> App<'a> {
                         self.files.push(self.input.clone());
                         self.paths.push(path);
                         self.lists.push(FileList::from_parts(
-                            vec![STARTER_FILE_TITLE.to_owned()],
-                            vec![STARTER_FILE_DESCRIPTION.to_owned()],
-                            vec![vec![Note {
-                                content: STARTER_FILE_NOTE.to_owned(),
-                                state: NoteEnum::Open,
-                            }]],
+                            vec!["Inbox".into()],
+                            vec![String::new()],
+                            vec![Vec::new()],
                         ));
                         self.file_index = self.files.len() - 1;
                         self.list_index = 0;
@@ -1338,20 +1333,6 @@ fn add_search_match(
     if seen.insert(found.clone()) {
         matches.push(found);
     }
-}
-
-fn valid_file_stem(name: &str) -> bool {
-    !name.trim().is_empty()
-        && name == name.trim()
-        && name != "."
-        && name != ".."
-        && !name.chars().any(|character| {
-            character.is_control()
-                || matches!(
-                    character,
-                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-                )
-        })
 }
 
 fn hash_file(path: &Path) -> io::Result<Option<u64>> {

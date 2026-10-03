@@ -48,6 +48,18 @@ The default data directory depends on your platform. Print it with `yoku --data-
 
 Lists can use headings from `#` through `######`. Checklists without a heading appear as an implicit Inbox. Tasks support `-`, `*`, `+`, and numbered bullets, uppercase or lowercase checked markers, and indented subtasks. Checkbox edits preserve the original bullet, indentation, and spacing. Code examples are excluded from tasks. Deleting a parent task includes its subtasks and continuation text; deleting a heading includes its subheadings. Both are undoable.
 
+Capture and inspect tasks from the shell without opening the TUI:
+
+```sh
+yoku add "Buy milk"
+yoku add "Review changes" --file work --list Inbox
+yoku list --open
+yoku list --state done --file work --json
+yoku --main-path ./todos add "Local project task"
+```
+
+Capture defaults to `inbox.md` and an Inbox heading, creating them as needed. Listing supports `--file` and `--list` and does not create files. JSON includes each task's file, list, index within the list, state, text, and indentation depth. New files created in the TUI start with an empty Inbox.
+
 ## Keyboard shortcuts
 
 - Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.
