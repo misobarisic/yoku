@@ -1,7 +1,8 @@
 pub mod app;
 
+use crate::query::TaskView;
 use crate::todo::NoteEnum;
-use crate::ui::app::{App, EditorMode, EMPTY_LIST, EMPTY_NOTE_VEC};
+use crate::ui::app::{App, EditorMode, EMPTY_LIST};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
@@ -120,6 +121,8 @@ where
         match app.mode {
             EditorMode::Nothing => match key.code {
                 KeyCode::Char('/') => app.begin_search(),
+                KeyCode::Char('f') => app.cycle_task_filter(),
+                KeyCode::Char('g') => app.toggle_global_view(),
                 KeyCode::Char('?') | KeyCode::F(1) => app.show_help = true,
                 KeyCode::Char('n') => app.search_next(true),
                 KeyCode::Char('N') => app.search_next(false),
@@ -279,8 +282,17 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     };
 
     let current_list = app.lists.get(app.file_index).unwrap_or(EMPTY_LIST);
+    let list_labels = current_list
+        .titles
+        .iter()
+        .enumerate()
+        .map(|(section, title)| {
+            let counts = app.list_counts(app.file_index, section);
+            format!("{title} ({}/{})", counts.done, counts.total())
+        })
+        .collect::<Vec<_>>();
     let (list_items, selected_list) = make_visible_tab_items(
-        &current_list.titles,
+        &list_labels,
         app.list_index,
         chunks[1].width.saturating_sub(2) as usize,
     );
@@ -302,11 +314,9 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            if app.file_is_dirty(index) {
-                format!("{name} *")
-            } else {
-                name.clone()
-            }
+            let counts = app.file_counts(index);
+            let dirty = if app.file_is_dirty(index) { " *" } else { "" };
+            format!("{name} ({}/{}){dirty}", counts.done, counts.total())
         })
         .collect::<Vec<_>>();
     let (file_items, selected_file) = make_visible_tab_items(
@@ -327,39 +337,49 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     }
     frame.render_widget(file_tabs, chunks[0]);
 
-    let notes = current_list
-        .notes
-        .get(app.list_index)
-        .unwrap_or(EMPTY_NOTE_VEC);
+    let tasks = app.visible_tasks();
+    let selected = tasks.iter().position(|task| *task == app.selected_task());
     let note_capacity = chunks[2].height.saturating_sub(2).max(1) as usize;
-    let note_start = if notes.len() > note_capacity && app.cursor_vertical == 2 {
-        app.note_index
+    let note_start = if tasks.len() > note_capacity && app.cursor_vertical == 2 {
+        selected
+            .unwrap_or(0)
             .saturating_sub(note_capacity / 2)
-            .min(notes.len() - note_capacity)
+            .min(tasks.len() - note_capacity)
     } else {
         0
     };
-    let items = notes
+    let items = tasks
         .iter()
         .enumerate()
         .skip(note_start)
         .take(note_capacity)
-        .map(|(index, note)| {
+        .map(|(index, location)| {
+            let list = &app.lists[location.file];
+            let note = &list.notes[location.section][location.note];
             let prefix = match note.state {
                 NoteEnum::Open => "[ ] ",
                 NoteEnum::Done => "[x] ",
                 NoteEnum::Rejected => "[-] ",
             };
-            let marker = if index == app.note_index && app.cursor_vertical == 2 {
+            let marker = if Some(index) == selected && app.cursor_vertical == 2 {
                 "> "
             } else {
                 "- "
             };
+            let context = if app.task_view == TaskView::Lists {
+                String::new()
+            } else {
+                format!(
+                    "{} / {}: ",
+                    app.files[location.file], list.titles[location.section]
+                )
+            };
             ListItem::new(Line::from(vec![
                 Span::raw(format!(
                     "{marker}{}{prefix}",
-                    " ".repeat(current_list.note_depth(app.list_index, index).min(40))
+                    " ".repeat(list.note_depth(location.section, location.note).min(40))
                 )),
+                Span::styled(context, Style::default().fg(Color::Cyan)),
                 Span::raw(note.content.as_str()),
             ]))
             .style(Style::default().fg(Color::White))
@@ -370,16 +390,41 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         .get(app.list_index)
         .map(String::as_str)
         .unwrap_or("");
-    let note_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(description))
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+    let counts = if app.task_view == TaskView::Lists {
+        app.list_counts(app.file_index, app.list_index)
+    } else {
+        crate::query::TaskCounts::from_notes(
+            app.lists
+                .iter()
+                .flat_map(|list| list.notes.iter().flatten()),
+        )
+    };
+    let task_title = format!(
+        "{} | {} | {} open, {} done, {} rejected",
+        if app.task_view == TaskView::Lists && !description.is_empty() {
+            description
+        } else {
+            app.task_view.label()
+        },
+        app.task_filter.label(),
+        counts.open,
+        counts.done,
+        counts.rejected
+    );
+    let note_list = List::new(if tasks.is_empty() {
+        vec![ListItem::new("No tasks match this view")]
+    } else {
+        items
+    })
+    .block(Block::default().borders(Borders::ALL).title(task_title))
+    .highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
     let mut visible_note_state = ListState::default();
-    if app.cursor_vertical == 2 && !notes.is_empty() {
-        visible_note_state.select(Some(app.note_index.saturating_sub(note_start)));
+    if app.cursor_vertical == 2 {
+        visible_note_state.select(selected.map(|index| index.saturating_sub(note_start)));
     }
     frame.render_stateful_widget(note_list, chunks[2], &mut visible_note_state);
 
@@ -453,7 +498,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
         })
         .or_else(|| app.status_message.clone())
         .unwrap_or_else(|| {
-            "?: help  /: search  Ctrl+S: save  Ctrl+Z: undo  q: save and quit".into()
+            "?: help  f: filter  g: all files  Ctrl+S: save  Ctrl+Z: undo  q: quit".into()
         });
     let status = Paragraph::new(message).style(
         Style::default()
@@ -479,8 +524,9 @@ fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
         .notes
         .get(app.list_index)
         .and_then(|notes| notes.get(app.note_index))
+        .filter(|_| app.visible_tasks().contains(&app.selected_task()))
         .map(|note| note.to_string())
-        .unwrap_or_else(|| "(no task)".into());
+        .unwrap_or_else(|| "(no matching task)".into());
     let body_height = area.height.saturating_sub(1);
     if app.mode != EditorMode::Nothing {
         let context = format!("{filename} / {title}");
@@ -527,7 +573,11 @@ fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
     let content = vec![
         Line::from(format!("File: {filename}")),
         Line::from(format!("List: {title}")),
-        Line::from(format!("Task: {note}")),
+        Line::from(format!(
+            "{} / {}: {note}",
+            app.task_view.label(),
+            app.task_filter.label()
+        )),
         Line::from("Resize terminal for full view"),
     ];
     frame.render_widget(
@@ -547,7 +597,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  f cycles All/Open/Done/Rejected; g toggles tasks across all files.\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(help)

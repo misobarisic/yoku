@@ -57,6 +57,7 @@ Lists can use headings from `#` through `######`. Checklists without a heading a
 - Press `u` to create a file, `i` to create a list, and `o` to create a task.
 - Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` undoes edits (including deletions, creations, renames, and task states); `Ctrl+Y` redoes them. The last 100 edits remain undoable after saving. Reloading external changes clears the history.
 - Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
+- Press `f` to cycle All/Open/Done/Rejected tasks and `g` to toggle a task view across every file. Tabs show done/total progress, and the task panel shows state counts. Search returns to the matching list with all states visible.
 - Press `?` or `F1` for the in-app help.
 - Press `Ctrl+S` to save and keep working; changed files have a `*` beside their name. Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
 - In an editor, use Left/Right, Home/End, Backspace, and Delete to move and edit text. Cursor movement treats accented letters and emoji as whole graphemes.

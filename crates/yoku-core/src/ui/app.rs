@@ -1,3 +1,4 @@
+use crate::query::{TaskCounts, TaskFilter, TaskLocation, TaskView};
 use crate::todo::{
     parse_markdown, FileList, Note, NoteEnum, STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE,
     STARTER_FILE_TITLE,
@@ -87,6 +88,8 @@ pub struct App<'a> {
     pub search_query: String,
     pub quit_after_save: bool,
     pub move_picker: Option<MovePicker>,
+    pub task_filter: TaskFilter,
+    pub task_view: TaskView,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
@@ -132,6 +135,8 @@ impl<'a> App<'a> {
             search_query: String::new(),
             quit_after_save: false,
             move_picker: None,
+            task_filter: TaskFilter::All,
+            task_view: TaskView::Lists,
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
@@ -151,7 +156,100 @@ impl<'a> App<'a> {
             .unwrap_or(&[])
     }
 
+    pub fn selected_task(&self) -> TaskLocation {
+        TaskLocation {
+            file: self.file_index,
+            section: self.list_index,
+            note: self.note_index,
+        }
+    }
+
+    pub fn visible_tasks(&self) -> Vec<TaskLocation> {
+        let mut tasks = Vec::new();
+        for (file, list) in self.lists.iter().enumerate() {
+            for (section, notes) in list.notes.iter().enumerate() {
+                if self.task_view == TaskView::Lists
+                    && (file, section) != (self.file_index, self.list_index)
+                {
+                    continue;
+                }
+                for (note, task) in notes.iter().enumerate() {
+                    if self.task_filter.accepts(task.state) {
+                        tasks.push(TaskLocation {
+                            file,
+                            section,
+                            note,
+                        });
+                    }
+                }
+            }
+        }
+        tasks
+    }
+
+    fn select_task(&mut self, task: TaskLocation) {
+        self.file_index = task.file;
+        self.list_index = task.section;
+        self.note_index = task.note;
+        self.cursor_vertical = 2;
+    }
+
+    pub fn cycle_task_filter(&mut self) {
+        self.task_filter = self.task_filter.next();
+        self.validate_and_update_indices();
+        self.status_message = Some(format!(
+            "{} tasks: {} visible; f changes status, g toggles all files",
+            self.task_filter.label(),
+            self.visible_tasks().len()
+        ));
+    }
+
+    pub fn toggle_global_view(&mut self) {
+        self.task_view = if self.task_view == TaskView::Lists {
+            TaskView::AllTasks
+        } else {
+            TaskView::Lists
+        };
+        if let Some(task) = self.visible_tasks().first().copied() {
+            self.select_task(task);
+        }
+        self.validate_and_update_indices();
+        self.status_message = None;
+    }
+
+    pub fn file_counts(&self, file: usize) -> TaskCounts {
+        self.lists
+            .get(file)
+            .map_or_else(TaskCounts::default, |list| {
+                TaskCounts::from_notes(list.notes.iter().flatten())
+            })
+    }
+
+    pub fn list_counts(&self, file: usize, section: usize) -> TaskCounts {
+        self.lists
+            .get(file)
+            .and_then(|list| list.notes.get(section))
+            .map_or_else(TaskCounts::default, |notes| {
+                TaskCounts::from_notes(notes.iter())
+            })
+    }
+
     fn validate_and_update_indices(&mut self) {
+        if self.cursor_vertical == 2 {
+            let tasks = self.visible_tasks();
+            if !tasks.contains(&self.selected_task()) {
+                if let Some(task) = tasks
+                    .iter()
+                    .find(|task| **task >= self.selected_task())
+                    .or_else(|| tasks.first())
+                    .copied()
+                {
+                    self.select_task(task);
+                } else {
+                    self.cursor_vertical = 1;
+                }
+            }
+        }
         if self.files.is_empty() {
             self.file_index = 0;
             self.list_index = 0;
@@ -218,7 +316,11 @@ impl<'a> App<'a> {
             {
                 self.cursor_vertical = 1;
             }
-            1 if !self.selected_notes().is_empty() => self.cursor_vertical = 2,
+            1 => {
+                if let Some(task) = self.visible_tasks().first().copied() {
+                    self.select_task(task);
+                }
+            }
             2 => self.next_note(),
             _ => {}
         }
@@ -229,7 +331,14 @@ impl<'a> App<'a> {
         match self.cursor_vertical {
             0 => {}
             1 => self.cursor_vertical = 0,
-            2 if self.note_index > 0 => self.previous_note(),
+            2 if self
+                .visible_tasks()
+                .iter()
+                .position(|task| *task == self.selected_task())
+                .is_some_and(|index| index > 0) =>
+            {
+                self.previous_note()
+            }
             2 => {
                 self.cursor_vertical = 1;
                 self.notes_state.select(None);
@@ -270,15 +379,18 @@ impl<'a> App<'a> {
     }
 
     pub fn next_note(&mut self) {
-        let note_count = self.selected_notes().len();
-        if note_count > 0 {
-            self.note_index = (self.note_index + 1).min(note_count - 1);
+        let tasks = self.visible_tasks();
+        if let Some(index) = tasks.iter().position(|task| *task == self.selected_task()) {
+            self.select_task(tasks[(index + 1).min(tasks.len() - 1)]);
         }
         self.validate_and_update_indices();
     }
 
     pub fn previous_note(&mut self) {
-        self.note_index = self.note_index.saturating_sub(1);
+        let tasks = self.visible_tasks();
+        if let Some(index) = tasks.iter().position(|task| *task == self.selected_task()) {
+            self.select_task(tasks[index.saturating_sub(1)]);
+        }
         self.validate_and_update_indices();
     }
 
@@ -298,6 +410,7 @@ impl<'a> App<'a> {
             note.set_state(state);
         }
         self.record_change(before);
+        self.validate_and_update_indices();
     }
 
     pub fn set_note_state(&mut self, state: NoteEnum) {
@@ -311,6 +424,7 @@ impl<'a> App<'a> {
             note.set_state(state);
         }
         self.record_change(before);
+        self.validate_and_update_indices();
     }
 
     pub fn reorder_selected_task(&mut self, down: bool) {
@@ -967,6 +1081,8 @@ impl<'a> App<'a> {
         let Some(found) = self.search_matches.get(index) else {
             return;
         };
+        self.task_filter = TaskFilter::All;
+        self.task_view = TaskView::Lists;
         self.file_index = found.file_index;
         if let Some(section_index) = found.section_index {
             self.list_index = section_index;
@@ -1108,6 +1224,7 @@ impl<'a> App<'a> {
                             },
                         );
                         self.note_index = current_list.notes[self.list_index].len() - 1;
+                        self.task_filter = TaskFilter::All;
                         self.cursor_vertical = 2;
                         self.finish_input();
                     }
@@ -1304,6 +1421,87 @@ mod tests {
         app.disk_hashes
             .insert(path, calculate_hash(&contents.as_bytes()));
         app.lists.push(list);
+    }
+
+    #[test]
+    fn filtering_keeps_actions_on_the_correct_document_indices() {
+        with_app(
+            "# Work\n- [x] finished\n- [ ] first\n- [-] rejected\n- [ ] second\n",
+            |app, _| {
+                app.task_filter = crate::query::TaskFilter::Open;
+                app.cursor_vertical = 1;
+                app.navigate_down();
+                assert_eq!(app.note_index, 1);
+                app.set_note_state(crate::todo::NoteEnum::Done);
+                assert_eq!(app.note_index, 3);
+                assert_eq!(app.file_counts(0).done, 2);
+                assert_eq!(app.list_counts(0, 0).open, 1);
+                app.undo();
+                assert_eq!(app.note_index, 1);
+                app.next_note();
+                assert_eq!(app.note_index, 3);
+                app.navigate_up();
+                assert_eq!(app.note_index, 1);
+                app.navigate_up();
+                assert_eq!(app.cursor_vertical, 1);
+            },
+        );
+    }
+
+    #[test]
+    fn global_view_navigates_and_edits_across_files() {
+        with_app("# Work\n- [ ] first\n", |app, root| {
+            add_test_file(app, root, "personal", "## Inbox\n- [ ] second\n");
+            app.toggle_global_view();
+            app.next_note();
+            assert_eq!(app.file_index, 1);
+            app.cycle_note_state();
+            assert_eq!(app.lists[1].notes[0][0].state, crate::todo::NoteEnum::Done);
+            assert_eq!(app.lists[0].notes[0][0].state, crate::todo::NoteEnum::Open);
+            app.undo();
+            app.remove();
+            assert!(app.lists[1].notes[0].is_empty());
+            assert_eq!(app.file_index, 0);
+            app.undo();
+            assert_eq!(app.file_index, 1);
+        });
+    }
+
+    #[test]
+    fn filtered_global_views_render_only_matching_tasks() {
+        with_app(
+            "# Work\n- [x] hidden finished task\n- [ ] visible work\n",
+            |app, root| {
+                add_test_file(app, root, "personal", "## Inbox\n- [ ] visible personal\n");
+                app.task_filter = crate::query::TaskFilter::Open;
+                app.toggle_global_view();
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+                terminal.draw(|frame| crate::ui::ui(frame, app)).unwrap();
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(text.contains("visible personal"));
+                assert!(text.contains("visible work"));
+                assert!(!text.contains("hidden finished task"));
+                app.task_filter = crate::query::TaskFilter::Rejected;
+                app.validate_and_update_indices();
+                assert_ne!(app.cursor_vertical, 2);
+                terminal.draw(|frame| crate::ui::ui(frame, app)).unwrap();
+                let text = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(text.contains("No tasks match this view"));
+            },
+        );
     }
 
     #[test]
