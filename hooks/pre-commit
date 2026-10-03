@@ -2,20 +2,20 @@
 
 set -eu
 
-if ! cargo fmt -- --check
+if ! cargo fmt --all -- --check
 then
     echo "There are some code style issues."
     echo "Run cargo fmt first."
     exit 1
 fi
 
-if ! cargo clippy --all-targets -- -D warnings
+if ! cargo clippy --workspace --all-targets --locked -- -D warnings
 then
     echo "There are some clippy issues."
     exit 1
 fi
 
-if ! cargo test
+if ! cargo test --workspace --locked
 then
     echo "There are some test issues."
     exit 1

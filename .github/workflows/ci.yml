@@ -1,91 +1,44 @@
-on:
-  pull_request:
-  push:
-    branches: main
+name: CI
 
-name: Continuous Integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  # Workaround for making Github Actions skip based on commit message `[skip ci]`
-  # Source https://gist.github.com/ybiquitous/c80f15c18319c63cae8447a3be341267
-  prepare:
+  checks:
+    name: Format, lint, and test
     runs-on: ubuntu-latest
-    if: |
-      !contains(format('{0} {1} {2}', github.event.head_commit.message, github.event.pull_request.title, github.event.pull_request.body), '[skip ci]')
     steps:
-      - run: |
-          cat <<'MESSAGE'
-          github.event_name: ${{ toJson(github.event_name) }}
-          github.event:
-          ${{ toJson(github.event) }}
-          MESSAGE
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --locked
 
-  check:
-    name: Check
+  minimum-rust:
+    name: Minimum supported Rust
     runs-on: ubuntu-latest
-    needs: prepare
     steps:
-      - uses: actions/checkout@master
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v7
         with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
-    needs: prepare
-    steps:
-      - uses: actions/checkout@master
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      # These dependencies are required for `clipboard`
-      - run: sudo apt-get install -y -qq libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - uses: Swatinem/rust-cache@v1
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
-
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    needs: prepare
-    steps:
-      - uses: actions/checkout@master
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v1
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    needs: prepare
-    steps:
-      - uses: actions/checkout@master
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-          components: clippy
-      - uses: Swatinem/rust-cache@v1
-      - uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: -- -D warnings
-
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check workspace on the MSRV
+        run: cargo check --workspace --locked

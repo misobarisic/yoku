@@ -18,8 +18,8 @@ mod tests {
         assert_eq!(2270354339022497229, calculate_hash(&3123));
         assert_eq!(14334111852693195205, calculate_hash(&643113));
         assert_eq!(2236313024366553744, calculate_hash(&431678));
-        assert_eq!(10363793956940938451, calculate_hash(&(547635431 as u64)));
-        assert_eq!(17234162834277073614, calculate_hash(&(5134687543 as u64)));
-        assert_eq!(8308702756688553632, calculate_hash(&(12381298312 as u64)));
+        assert_eq!(10363793956940938451, calculate_hash(&547635431_u64));
+        assert_eq!(17234162834277073614, calculate_hash(&5134687543_u64));
+        assert_eq!(8308702756688553632, calculate_hash(&12381298312_u64));
     }
 }

@@ -1,7 +1,4 @@
 .idea/
 
 /target/
-/src/lib/target/
-
-Cargo.lock
 **/*.rs.bk

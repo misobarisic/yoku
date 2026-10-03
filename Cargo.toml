@@ -1,12 +1,30 @@
+[workspace]
+members = [".", "crates/yoku-core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+dirs = "7"
+ratatui = "0.30"
+tempfile = "3"
+
 [package]
 name = "yoku"
 version = "0.1.2"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
+description = "A Markdown based terminal todo app"
+license.workspace = true
+repository = "https://github.com/misobarisic/yoku"
 
 [dependencies]
-dirs = "4.0.0"
-crossterm = "0.23.0"
-tui = "0.17.0"
-structopt = "0.3"
-regex = "1"
-lib = {path= "src/lib" }
+clap.workspace = true
+dirs.workspace = true
+ratatui.workspace = true
+yoku-core = { path = "crates/yoku-core" }
