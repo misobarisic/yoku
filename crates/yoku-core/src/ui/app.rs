@@ -1,6 +1,6 @@
 use crate::todo::{
-    parse_markdown, FileList, Note, NoteEnum, STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE,
-    STARTER_FILE_TITLE,
+    parse_markdown, FileList, Note, NoteEnum, RemovedNote, RemovedSection,
+    STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE, STARTER_FILE_TITLE,
 };
 use crate::util::calculate_hash;
 use ratatui::widgets::ListState;
@@ -39,6 +39,26 @@ pub struct SaveConflict {
     pub kind: SaveConflictKind,
 }
 
+enum UndoAction {
+    Note {
+        file_index: usize,
+        section_index: usize,
+        note_index: usize,
+        removed: RemovedNote,
+    },
+    Section {
+        file_index: usize,
+        section_index: usize,
+        removed: RemovedSection,
+    },
+    File {
+        file_index: usize,
+        name: String,
+        path: PathBuf,
+        list: FileList,
+    },
+}
+
 pub struct App<'a> {
     pub main_path: &'a Path,
     pub files: &'a mut Vec<String>,
@@ -58,9 +78,12 @@ pub struct App<'a> {
     pub input_cursor: usize,
     pub status_message: Option<String>,
     pub save_conflict: Option<SaveConflict>,
+    pub pending_file_delete: Option<usize>,
+    pub confirm_discard: bool,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
+    undo_stack: Vec<UndoAction>,
 }
 
 impl<'a> App<'a> {
@@ -93,8 +116,11 @@ impl<'a> App<'a> {
             input_cursor: 0,
             status_message: None,
             save_conflict: None,
+            pending_file_delete: None,
+            confirm_discard: false,
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
+            undo_stack: Vec::new(),
         };
         app.validate_and_update_indices();
         app
@@ -355,6 +381,7 @@ impl<'a> App<'a> {
         }
         self.to_remove.clear();
         self.renamed_from.clear();
+        self.undo_stack.clear();
         Ok(true)
     }
 
@@ -505,29 +532,146 @@ impl<'a> App<'a> {
     pub fn remove(&mut self) {
         match self.cursor_vertical {
             0 => {
-                if self.file_index < self.paths.len() {
-                    self.to_remove.push(self.paths.remove(self.file_index));
-                }
                 if self.file_index < self.files.len() {
-                    self.files.remove(self.file_index);
-                }
-                if self.file_index < self.lists.len() {
-                    self.lists.remove(self.file_index);
+                    self.pending_file_delete = Some(self.file_index);
                 }
             }
             1 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    list.remove(self.list_index);
+                    if let Some(removed) = list.take_section(self.list_index) {
+                        self.undo_stack.push(UndoAction::Section {
+                            file_index: self.file_index,
+                            section_index: self.list_index,
+                            removed,
+                        });
+                    }
                 }
             }
             2 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    list.remove_note(self.list_index, self.note_index);
+                    if let Some(removed) = list.remove_note(self.list_index, self.note_index) {
+                        self.undo_stack.push(UndoAction::Note {
+                            file_index: self.file_index,
+                            section_index: self.list_index,
+                            note_index: self.note_index,
+                            removed,
+                        });
+                    }
                 }
             }
             _ => {}
         }
         self.validate_and_update_indices();
+    }
+
+    pub fn confirm_file_delete(&mut self) {
+        let Some(index) = self.pending_file_delete.take() else {
+            return;
+        };
+        if index >= self.files.len() || index >= self.paths.len() || index >= self.lists.len() {
+            return;
+        }
+        let name = self.files.remove(index);
+        let path = self.paths.remove(index);
+        let list = self.lists.remove(index);
+        if !self.to_remove.contains(&path) {
+            self.to_remove.push(path.clone());
+        }
+        self.undo_stack.push(UndoAction::File {
+            file_index: index,
+            name,
+            path,
+            list,
+        });
+        self.validate_and_update_indices();
+        self.status_message =
+            Some("File marked for deletion. Ctrl+Z restores the last deletion".into());
+    }
+
+    pub fn cancel_file_delete(&mut self) {
+        self.pending_file_delete = None;
+        self.status_message = Some("File deletion canceled".into());
+    }
+
+    pub fn undo_last_delete(&mut self) {
+        let Some(action) = self.undo_stack.pop() else {
+            self.status_message = Some("There is no deletion to undo".into());
+            return;
+        };
+        match action {
+            UndoAction::Note {
+                file_index,
+                section_index,
+                note_index,
+                removed,
+            } => {
+                if let Some(list) = self.lists.get_mut(file_index) {
+                    list.restore_note(section_index, note_index, removed);
+                    self.file_index = file_index;
+                    self.list_index = section_index;
+                    self.note_index = note_index;
+                    self.cursor_vertical = 2;
+                }
+            }
+            UndoAction::Section {
+                file_index,
+                section_index,
+                removed,
+            } => {
+                if let Some(list) = self.lists.get_mut(file_index) {
+                    list.restore_section(section_index, removed);
+                    self.file_index = file_index;
+                    self.list_index = section_index;
+                    self.note_index = 0;
+                    self.cursor_vertical = 1;
+                }
+            }
+            UndoAction::File {
+                file_index,
+                name,
+                path,
+                list,
+            } => {
+                let index = file_index.min(self.files.len());
+                self.files.insert(index, name);
+                self.paths.insert(index, path.clone());
+                self.lists.insert(index, list);
+                if let Some(position) = self.to_remove.iter().position(|removed| removed == &path) {
+                    self.to_remove.remove(position);
+                }
+                self.file_index = index;
+                self.list_index = 0;
+                self.note_index = 0;
+                self.cursor_vertical = 0;
+            }
+        }
+        self.validate_and_update_indices();
+        self.status_message = Some("Restored the last deletion".into());
+    }
+
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.mode != EditorMode::Nothing
+            || self.pending_file_delete.is_some()
+            || !self.to_remove.is_empty()
+            || self
+                .paths
+                .iter()
+                .zip(self.lists.iter())
+                .any(|(path, list)| self.hashes.get(path).copied() != Some(calculate_hash(list)))
+    }
+
+    pub fn begin_discard_confirmation(&mut self) -> bool {
+        if self.has_unsaved_changes() {
+            self.confirm_discard = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cancel_discard(&mut self) {
+        self.confirm_discard = false;
+        self.status_message = Some("Discard canceled; your changes are still available".into());
     }
 
     pub fn create_file(&mut self) {
@@ -921,5 +1065,85 @@ mod tests {
         app.delete_input();
         assert_eq!(app.input, "👩‍💻界Z");
         assert_eq!(app.input_cursor_display_width(), 0);
+    }
+
+    #[test]
+    fn note_and_section_deletions_can_be_undone_before_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let contents = "# One\n- [ ] task\n\n# Two\n## preserved\n";
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), contents);
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.cursor_vertical = 2;
+        app.remove();
+        assert!(app.lists[0].notes[0].is_empty());
+        app.undo_last_delete();
+        assert_eq!(app.lists[0].notes[0][0].content, "task");
+
+        app.cursor_vertical = 1;
+        app.list_index = 1;
+        app.remove();
+        assert_eq!(app.lists[0].titles, ["One"]);
+        app.undo_last_delete();
+        assert_eq!(app.lists[0].titles, ["One", "Two"]);
+        assert!(app.lists[0].to_string().contains("## preserved"));
+    }
+
+    #[test]
+    fn whole_file_delete_requires_confirmation_and_can_be_undone() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let target = paths[0].clone();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.cursor_vertical = 0;
+        app.remove();
+        assert_eq!(app.paths.len(), 1);
+        assert_eq!(app.pending_file_delete, Some(0));
+        app.confirm_file_delete();
+        assert!(app.paths.is_empty());
+        app.undo_last_delete();
+        assert_eq!(app.paths[0], target);
+        assert!(app.to_remove.is_empty());
+    }
+
+    #[test]
+    fn discard_confirmation_does_not_clear_in_memory_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.lists[0].notes[0][0].content = "local edit".into();
+
+        assert!(app.begin_discard_confirmation());
+        app.cancel_discard();
+        assert_eq!(app.lists[0].notes[0][0].content, "local edit");
+        assert!(!app.confirm_discard);
     }
 }

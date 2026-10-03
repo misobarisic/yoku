@@ -29,6 +29,24 @@ where
             continue;
         }
 
+        if app.confirm_discard {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => return Ok(()),
+                KeyCode::Esc | KeyCode::Char('n') => app.cancel_discard(),
+                _ => {}
+            }
+            continue;
+        }
+
+        if app.pending_file_delete.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => app.confirm_file_delete(),
+                KeyCode::Esc | KeyCode::Char('n') => app.cancel_file_delete(),
+                _ => {}
+            }
+            continue;
+        }
+
         if let Some(conflict) = app.save_conflict.clone() {
             match key.code {
                 KeyCode::Char('o') => {
@@ -55,6 +73,11 @@ where
             continue;
         }
 
+        if key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::CONTROL {
+            app.undo_last_delete();
+            continue;
+        }
+
         match app.mode {
             EditorMode::Nothing => match key.code {
                 KeyCode::Char('o') => app.create_note(),
@@ -68,13 +91,21 @@ where
                         app.change();
                     }
                 }
-                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
+                    if !app.begin_discard_confirmation() {
+                        return Ok(());
+                    }
+                }
                 KeyCode::Char('q') => match app.save() {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
                     Err(error) => app.status_message = Some(format!("Save failed: {error}")),
                 },
-                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                    if !app.begin_discard_confirmation() {
+                        return Ok(());
+                    }
+                }
                 KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('l') => app.next(),
                 KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('h') => app.previous(),
                 KeyCode::Up | KeyCode::Char('w') | KeyCode::Char('k') => app.navigate_up(),
@@ -95,8 +126,16 @@ where
                 _ => {}
             },
             _ => match key.code {
-                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
-                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
+                    if !app.begin_discard_confirmation() {
+                        return Ok(());
+                    }
+                }
+                KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
+                    if !app.begin_discard_confirmation() {
+                        return Ok(());
+                    }
+                }
                 KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
                     app.move_input_home()
                 }
@@ -259,16 +298,29 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
 
     if area.height > 0 {
         let message = app
-            .save_conflict
-            .as_ref()
-            .map(|conflict| {
-                let action = if conflict.kind == crate::ui::app::SaveConflictKind::DestinationExists
-                {
-                    "o overwrite, Esc cancel"
-                } else {
-                    "r reload, o overwrite, Esc cancel"
-                };
-                format!("Save conflict at {}. {action}", conflict.path.display())
+            .confirm_discard
+            .then(|| "Unsaved changes. Press y to discard or Esc to keep editing".to_owned())
+            .or_else(|| {
+                app.pending_file_delete.map(|index| {
+                    format!(
+                        "Delete file '{}'? Press y/Enter to confirm or Esc to cancel",
+                        app.files
+                            .get(index)
+                            .map(String::as_str)
+                            .unwrap_or("unknown")
+                    )
+                })
+            })
+            .or_else(|| {
+                app.save_conflict.as_ref().map(|conflict| {
+                    let action =
+                        if conflict.kind == crate::ui::app::SaveConflictKind::DestinationExists {
+                            "o overwrite, Esc cancel"
+                        } else {
+                            "r reload, o overwrite, Esc cancel"
+                        };
+                    format!("Save conflict at {}. {action}", conflict.path.display())
+                })
             })
             .or_else(|| app.status_message.clone());
         if let Some(message) = message {

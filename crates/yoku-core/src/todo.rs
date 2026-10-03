@@ -60,6 +60,21 @@ struct SourceLine {
     ending: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct RemovedSection {
+    title: String,
+    description: String,
+    notes: Vec<Note>,
+    source_section: Option<SourceSection>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RemovedNote {
+    note: Note,
+    body_index: Option<usize>,
+    source_block: Option<SourceBlock>,
+}
+
 impl FileList {
     pub const fn empty_const() -> Self {
         Self {
@@ -158,21 +173,31 @@ impl FileList {
         }
     }
 
-    pub fn remove_note(&mut self, section_index: usize, note_index: usize) {
+    pub fn remove_note(&mut self, section_index: usize, note_index: usize) -> Option<RemovedNote> {
         let Some(section_notes) = self.notes.get_mut(section_index) else {
-            return;
+            return None;
         };
         if note_index >= section_notes.len() {
-            return;
+            return None;
         }
-        section_notes.remove(note_index);
+        let note = section_notes.remove(note_index);
+        let mut removed = RemovedNote {
+            note,
+            body_index: None,
+            source_block: None,
+        };
         if let Some(section) = self
             .source
             .as_mut()
             .and_then(|source| source.sections.get_mut(section_index))
         {
+            if let Some(body_index) = section.body.iter().position(|block| {
+                matches!(block.kind, SourceBlockKind::Note { index, .. } if index == note_index)
+            }) {
+                removed.body_index = Some(body_index);
+                removed.source_block = Some(section.body.remove(body_index));
+            }
             section.body.retain_mut(|block| match &mut block.kind {
-                SourceBlockKind::Note { index, .. } if *index == note_index => false,
                 SourceBlockKind::Note { index, .. } if *index > note_index => {
                     *index -= 1;
                     true
@@ -180,25 +205,83 @@ impl FileList {
                 _ => true,
             });
         }
+        Some(removed)
+    }
+
+    pub fn restore_note(&mut self, section_index: usize, note_index: usize, removed: RemovedNote) {
+        let Some(section_notes) = self.notes.get_mut(section_index) else {
+            return;
+        };
+        let note_index = note_index.min(section_notes.len());
+        section_notes.insert(note_index, removed.note);
+        if let Some(section) = self
+            .source
+            .as_mut()
+            .and_then(|source| source.sections.get_mut(section_index))
+        {
+            for block in &mut section.body {
+                if let SourceBlockKind::Note { index, .. } = &mut block.kind {
+                    if *index >= note_index {
+                        *index += 1;
+                    }
+                }
+            }
+            if let Some(mut block) = removed.source_block {
+                if let SourceBlockKind::Note { index, .. } = &mut block.kind {
+                    *index = note_index;
+                }
+                let body_index = removed.body_index.unwrap_or(section.body.len());
+                section
+                    .body
+                    .insert(body_index.min(section.body.len()), block);
+            }
+        }
+    }
+
+    pub fn take_section(&mut self, index: usize) -> Option<RemovedSection> {
+        if index >= self.titles.len() {
+            return None;
+        }
+        let title = self.titles.remove(index);
+        let description = if index < self.descriptions.len() {
+            self.descriptions.remove(index)
+        } else {
+            String::new()
+        };
+        let notes = if index < self.notes.len() {
+            self.notes.remove(index)
+        } else {
+            Vec::new()
+        };
+        let source_section = self.source.as_mut().and_then(|source| {
+            (index < source.sections.len()).then(|| source.sections.remove(index))
+        });
+        Some(RemovedSection {
+            title,
+            description,
+            notes,
+            source_section,
+        })
+    }
+
+    pub fn restore_section(&mut self, index: usize, removed: RemovedSection) {
+        let index = index.min(self.titles.len());
+        self.titles.insert(index, removed.title);
+        self.descriptions.insert(index, removed.description);
+        self.notes.insert(index, removed.notes);
+        if let Some(section) = self.source.as_mut() {
+            if let Some(source_section) = removed.source_section {
+                section
+                    .sections
+                    .insert(index.min(section.sections.len()), source_section);
+            }
+        }
     }
 }
 
 impl FileList {
     pub fn remove(&mut self, index: usize) {
-        if index < self.titles.len() {
-            self.titles.remove(index);
-        }
-        if index < self.descriptions.len() {
-            self.descriptions.remove(index);
-        }
-        if index < self.notes.len() {
-            self.notes.remove(index);
-        }
-        if let Some(source) = &mut self.source {
-            if index < source.sections.len() {
-                source.sections.remove(index);
-            }
-        }
+        let _ = self.take_section(index);
     }
 
     /// Write a complete replacement beside the destination, then rename it into place.
