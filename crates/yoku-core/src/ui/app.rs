@@ -1,6 +1,6 @@
 use crate::todo::{
-    parse_markdown, FileList, Note, NoteEnum, RemovedNote, RemovedSection,
-    STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE, STARTER_FILE_TITLE,
+    parse_markdown, FileList, Note, NoteEnum, STARTER_FILE_DESCRIPTION, STARTER_FILE_NOTE,
+    STARTER_FILE_TITLE,
 };
 use crate::util::calculate_hash;
 use ratatui::widgets::ListState;
@@ -40,24 +40,14 @@ pub struct SaveConflict {
     pub kind: SaveConflictKind,
 }
 
-enum UndoAction {
-    Note {
-        file_index: usize,
-        section_index: usize,
-        note_index: usize,
-        removed: RemovedNote,
-    },
-    Section {
-        file_index: usize,
-        section_index: usize,
-        removed: RemovedSection,
-    },
-    File {
-        file_index: usize,
-        name: String,
-        path: PathBuf,
-        list: FileList,
-    },
+#[derive(Clone)]
+struct EditSnapshot {
+    files: Vec<String>,
+    paths: Vec<PathBuf>,
+    lists: Vec<FileList>,
+    to_remove: Vec<PathBuf>,
+    renamed_from: HashMap<PathBuf, PathBuf>,
+    selection: (usize, usize, usize, usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -94,7 +84,8 @@ pub struct App<'a> {
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
-    undo_stack: Vec<UndoAction>,
+    undo_stack: Vec<EditSnapshot>,
+    redo_stack: Vec<EditSnapshot>,
     search_matches: Vec<SearchMatch>,
     search_index: Option<usize>,
 }
@@ -137,6 +128,7 @@ impl<'a> App<'a> {
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             search_matches: Vec::new(),
             search_index: None,
         };
@@ -284,6 +276,7 @@ impl<'a> App<'a> {
     }
 
     pub fn cycle_note_state(&mut self) {
+        let before = self.snapshot();
         if let Some(note) = self
             .lists
             .get_mut(self.file_index)
@@ -297,9 +290,11 @@ impl<'a> App<'a> {
             };
             note.set_state(state);
         }
+        self.record_change(before);
     }
 
     pub fn set_note_state(&mut self, state: NoteEnum) {
+        let before = self.snapshot();
         if let Some(note) = self
             .lists
             .get_mut(self.file_index)
@@ -308,6 +303,7 @@ impl<'a> App<'a> {
         {
             note.set_state(state);
         }
+        self.record_change(before);
     }
 
     pub fn save(&mut self) -> io::Result<bool> {
@@ -399,7 +395,6 @@ impl<'a> App<'a> {
         }
         self.to_remove.clear();
         self.renamed_from.clear();
-        self.undo_stack.clear();
         Ok(true)
     }
 
@@ -504,9 +499,6 @@ impl<'a> App<'a> {
                 self.lists.push(list);
             }
             self.to_remove.retain(|removed| removed != &path);
-            self.undo_stack.retain(|action| {
-                !matches!(action, UndoAction::File { path: deleted, .. } if deleted == &path)
-            });
             self.hashes.insert(path.clone(), file_hash);
             self.disk_hashes.insert(path, disk_hash);
             self.validate_and_update_indices();
@@ -519,7 +511,8 @@ impl<'a> App<'a> {
             ));
         }
         self.undo_stack.clear();
-        self.status_message = Some("Reloaded from disk; deletion undo history was cleared".into());
+        self.redo_stack.clear();
+        self.status_message = Some("Reloaded from disk; undo history was cleared".into());
         Ok(())
     }
 
@@ -578,36 +571,24 @@ impl<'a> App<'a> {
     }
 
     pub fn remove(&mut self) {
+        let before = self.snapshot();
         match self.cursor_vertical {
             0 if self.file_index < self.files.len() => {
                 self.pending_file_delete = Some(self.file_index);
             }
-            0 => {}
             1 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    if let Some(removed) = list.take_section(self.list_index) {
-                        self.undo_stack.push(UndoAction::Section {
-                            file_index: self.file_index,
-                            section_index: self.list_index,
-                            removed,
-                        });
-                    }
+                    list.take_section(self.list_index);
                 }
             }
             2 => {
                 if let Some(list) = self.lists.get_mut(self.file_index) {
-                    if let Some(removed) = list.remove_note(self.list_index, self.note_index) {
-                        self.undo_stack.push(UndoAction::Note {
-                            file_index: self.file_index,
-                            section_index: self.list_index,
-                            note_index: self.note_index,
-                            removed,
-                        });
-                    }
+                    list.remove_note(self.list_index, self.note_index);
                 }
             }
             _ => {}
         }
+        self.record_change(before);
         self.validate_and_update_indices();
     }
 
@@ -618,21 +599,16 @@ impl<'a> App<'a> {
         if index >= self.files.len() || index >= self.paths.len() || index >= self.lists.len() {
             return;
         }
-        let name = self.files.remove(index);
+        let before = self.snapshot();
+        self.files.remove(index);
         let path = self.paths.remove(index);
-        let list = self.lists.remove(index);
+        self.lists.remove(index);
         if !self.to_remove.contains(&path) {
-            self.to_remove.push(path.clone());
+            self.to_remove.push(path);
         }
-        self.undo_stack.push(UndoAction::File {
-            file_index: index,
-            name,
-            path,
-            list,
-        });
+        self.record_change(before);
         self.validate_and_update_indices();
-        self.status_message =
-            Some("File marked for deletion. Ctrl+Z restores the last deletion".into());
+        self.status_message = Some("File marked for deletion. Ctrl+Z restores it".into());
     }
 
     pub fn cancel_file_delete(&mut self) {
@@ -640,60 +616,94 @@ impl<'a> App<'a> {
         self.status_message = Some("File deletion canceled".into());
     }
 
-    pub fn undo_last_delete(&mut self) {
-        let Some(action) = self.undo_stack.pop() else {
-            self.status_message = Some("There is no deletion to undo".into());
-            return;
-        };
-        match action {
-            UndoAction::Note {
-                file_index,
-                section_index,
-                note_index,
-                removed,
-            } => {
-                if let Some(list) = self.lists.get_mut(file_index) {
-                    list.restore_note(section_index, note_index, removed);
-                    self.file_index = file_index;
-                    self.list_index = section_index;
-                    self.note_index = note_index;
-                    self.cursor_vertical = 2;
-                }
+    fn snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            files: self.files.clone(),
+            paths: self.paths.clone(),
+            lists: self.lists.clone(),
+            to_remove: self.to_remove.clone(),
+            renamed_from: self.renamed_from.clone(),
+            selection: (
+                self.file_index,
+                self.list_index,
+                self.note_index,
+                self.cursor_vertical,
+            ),
+        }
+    }
+
+    fn record_change(&mut self, before: EditSnapshot) {
+        let changed = before.files != *self.files
+            || before.paths != *self.paths
+            || before.to_remove != *self.to_remove
+            || before.lists.len() != self.lists.len()
+            || before
+                .lists
+                .iter()
+                .zip(self.lists.iter())
+                .any(|(a, b)| a.to_string() != b.to_string());
+        if changed {
+            if self.undo_stack.len() == 100 {
+                self.undo_stack.remove(0);
             }
-            UndoAction::Section {
-                file_index,
-                section_index,
-                removed,
-            } => {
-                if let Some(list) = self.lists.get_mut(file_index) {
-                    list.restore_section(section_index, removed);
-                    self.file_index = file_index;
-                    self.list_index = section_index;
-                    self.note_index = 0;
-                    self.cursor_vertical = 1;
-                }
-            }
-            UndoAction::File {
-                file_index,
-                name,
-                path,
-                list,
-            } => {
-                let index = file_index.min(self.files.len());
-                self.files.insert(index, name);
-                self.paths.insert(index, path.clone());
-                self.lists.insert(index, list);
-                if let Some(position) = self.to_remove.iter().position(|removed| removed == &path) {
-                    self.to_remove.remove(position);
-                }
-                self.file_index = index;
-                self.list_index = 0;
-                self.note_index = 0;
-                self.cursor_vertical = 0;
+            self.undo_stack.push(before);
+            self.redo_stack.clear();
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: EditSnapshot) {
+        // Paths removed by an undo after saving must be deleted on the next save.
+        // Disk hashes always describe the real disk, never an earlier snapshot.
+        let newly_removed = self
+            .paths
+            .iter()
+            .filter(|path| !snapshot.paths.contains(path) && self.disk_hashes.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        *self.files = snapshot.files;
+        *self.paths = snapshot.paths;
+        *self.lists = snapshot.lists;
+        *self.to_remove = snapshot.to_remove;
+        for path in newly_removed {
+            if !self.to_remove.contains(&path) {
+                self.to_remove.push(path);
             }
         }
+        self.to_remove.retain(|path| !self.paths.contains(path));
+        self.renamed_from = snapshot.renamed_from;
+        (
+            self.file_index,
+            self.list_index,
+            self.note_index,
+            self.cursor_vertical,
+        ) = snapshot.selection;
+        self.pending_file_delete = None;
+        self.save_conflict = None;
         self.validate_and_update_indices();
-        self.status_message = Some("Restored the last deletion".into());
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(snapshot) = self.undo_stack.pop() {
+            self.redo_stack.push(self.snapshot());
+            self.restore_snapshot(snapshot);
+            self.status_message = Some("Undid the last edit".into());
+        } else {
+            self.status_message = Some("There is no edit to undo".into());
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(snapshot) = self.redo_stack.pop() {
+            self.undo_stack.push(self.snapshot());
+            self.restore_snapshot(snapshot);
+            self.status_message = Some("Redid the last edit".into());
+        } else {
+            self.status_message = Some("There is no edit to redo".into());
+        }
+    }
+
+    pub fn undo_last_delete(&mut self) {
+        self.undo();
     }
 
     pub fn has_unsaved_changes(&self) -> bool {
@@ -930,6 +940,7 @@ impl<'a> App<'a> {
     }
 
     pub fn handle_enter(&mut self) {
+        let before = self.snapshot();
         match self.mode {
             EditorMode::CreateFile => {
                 if !self.input.trim().is_empty() && valid_file_stem(&self.input) {
@@ -1058,6 +1069,7 @@ impl<'a> App<'a> {
             EditorMode::Search => self.complete_search(),
             EditorMode::Nothing => {}
         }
+        self.record_change(before);
         self.validate_and_update_indices();
     }
 
@@ -1145,6 +1157,113 @@ mod tests {
             disk_hashes,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn undo_redo_restores_edits_and_renames_across_saves() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = "# Work\r\n- [ ] task\r\n";
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), original);
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.cursor_vertical = 2;
+        app.change();
+        app.set_input("edited".into());
+        app.handle_enter();
+        app.save().unwrap();
+        app.undo();
+        app.save().unwrap();
+        assert_eq!(fs::read_to_string(&app.paths[0]).unwrap(), original);
+        app.redo();
+        assert_eq!(app.lists[0].notes[0][0].content, "edited");
+        app.cycle_note_state();
+        app.undo();
+        assert_eq!(app.lists[0].notes[0][0].state, crate::todo::NoteEnum::Open);
+        app.redo();
+        assert_eq!(app.lists[0].notes[0][0].state, crate::todo::NoteEnum::Done);
+
+        app.cursor_vertical = 0;
+        app.change();
+        app.set_input("renamed".into());
+        app.handle_enter();
+        app.save().unwrap();
+        assert!(!directory.path().join("todos.md").exists());
+        app.undo();
+        app.save().unwrap();
+        assert!(directory.path().join("todos.md").exists());
+        assert!(!directory.path().join("renamed.md").exists());
+        app.redo();
+        app.save().unwrap();
+        assert!(directory.path().join("renamed.md").exists());
+        assert!(!directory.path().join("todos.md").exists());
+    }
+
+    #[test]
+    fn saved_file_creation_and_deletion_can_be_undone_and_redone() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.create_file();
+        app.set_input("new".into());
+        app.handle_enter();
+        app.save().unwrap();
+        app.undo();
+        app.save().unwrap();
+        assert!(!directory.path().join("new.md").exists());
+        app.redo();
+        app.save().unwrap();
+        assert!(directory.path().join("new.md").exists());
+        app.cursor_vertical = 0;
+        app.remove();
+        app.confirm_file_delete();
+        app.save().unwrap();
+        app.undo();
+        app.save().unwrap();
+        assert!(directory.path().join("new.md").exists());
+        app.redo();
+        app.save().unwrap();
+        assert!(!directory.path().join("new.md").exists());
+    }
+
+    #[test]
+    fn a_new_edit_discards_redo_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        app.cycle_note_state();
+        app.undo();
+        app.create_note();
+        app.set_input("new task".into());
+        app.handle_enter();
+        app.redo();
+        assert_eq!(app.lists[0].notes[0][0].state, crate::todo::NoteEnum::Open);
+        assert_eq!(app.lists[0].notes[0].len(), 2);
     }
 
     #[test]

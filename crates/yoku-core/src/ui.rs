@@ -84,7 +84,15 @@ where
             && key.code == KeyCode::Char('z')
             && key.modifiers == KeyModifiers::CONTROL
         {
-            app.undo_last_delete();
+            app.undo();
+            continue;
+        }
+
+        if app.mode == EditorMode::Nothing
+            && (key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::CONTROL
+                || key.code == KeyCode::Char('Z') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            app.redo();
             continue;
         }
 
@@ -516,7 +524,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes the last deletion until save or conflict reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(help)
