@@ -29,6 +29,32 @@ where
             continue;
         }
 
+        if let Some(conflict) = app.save_conflict.clone() {
+            match key.code {
+                KeyCode::Char('o') => {
+                    app.overwrite_conflict();
+                    match app.save() {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => {}
+                        Err(error) => {
+                            app.status_message = Some(format!("Save failed: {error}"));
+                        }
+                    }
+                }
+                KeyCode::Char('r')
+                    if conflict.kind != crate::ui::app::SaveConflictKind::DestinationExists =>
+                {
+                    if let Err(error) = app.reload_conflict() {
+                        app.save_conflict = Some(conflict);
+                        app.status_message = Some(format!("Could not reload file: {error}"));
+                    }
+                }
+                KeyCode::Esc => app.cancel_conflict(),
+                _ => {}
+            }
+            continue;
+        }
+
         match app.mode {
             EditorMode::Nothing => match key.code {
                 KeyCode::Char('o') => app.create_note(),
@@ -42,13 +68,12 @@ where
                         app.change();
                     }
                 }
-                KeyCode::Char('q') => {
-                    return if key.modifiers == KeyModifiers::CONTROL {
-                        Ok(())
-                    } else {
-                        Ok(app.save()?)
-                    };
-                }
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
+                KeyCode::Char('q') => match app.save() {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error) => app.status_message = Some(format!("Save failed: {error}")),
+                },
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
                 KeyCode::Right | KeyCode::Char('d') | KeyCode::Char('l') => app.next(),
                 KeyCode::Left | KeyCode::Char('a') | KeyCode::Char('h') => app.previous(),
@@ -203,6 +228,33 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                     .style(Style::default().fg(Color::LightCyan)),
             );
         frame.render_widget(input, chunks[3]);
+    }
+
+    if area.height > 0 {
+        let message = app
+            .save_conflict
+            .as_ref()
+            .map(|conflict| {
+                let action = if conflict.kind == crate::ui::app::SaveConflictKind::DestinationExists
+                {
+                    "o overwrite, Esc cancel"
+                } else {
+                    "r reload, o overwrite, Esc cancel"
+                };
+                format!("Save conflict at {}. {action}", conflict.path.display())
+            })
+            .or_else(|| app.status_message.clone());
+        if let Some(message) = message {
+            let status = Paragraph::new(message).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Rgb(31, 41, 55)),
+            );
+            frame.render_widget(
+                status,
+                ratatui::layout::Rect::new(0, area.height - 1, area.width, 1),
+            );
+        }
     }
 }
 

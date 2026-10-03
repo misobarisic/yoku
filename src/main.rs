@@ -84,9 +84,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut files = Vec::with_capacity(paths.len());
     let mut lists: Vec<FileList> = Vec::with_capacity(paths.len());
+    let mut disk_hashes = HashMap::with_capacity(paths.len());
     for path in &paths {
         let contents = fs::read_to_string(path)?;
         files.push(extract_naked_filename(path)?);
+        disk_hashes.insert(path.clone(), calculate_hash(&contents.as_bytes()));
         lists.push(parse_markdown(&contents));
     }
 
@@ -102,6 +104,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut paths,
         &mut lists,
         &mut hashes,
+        &mut disk_hashes,
         &main_path,
         &mut to_remove,
     );

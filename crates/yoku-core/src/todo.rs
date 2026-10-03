@@ -220,6 +220,21 @@ impl FileList {
             .map(|_| ())
             .map_err(|error| error.error)
     }
+
+    /// Create a new destination without replacing a file created by another process.
+    pub fn write_new(&self, path: &Path) -> io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut temporary = NamedTempFile::new_in(parent)?;
+        temporary.write_all(self.to_string().as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist_noclobber(path)
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
 }
 
 impl fmt::Display for FileList {
