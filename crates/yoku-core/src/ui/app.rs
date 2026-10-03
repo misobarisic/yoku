@@ -465,33 +465,28 @@ impl<'a> App<'a> {
     }
 
     pub fn cycle_note_state(&mut self) {
-        let before = self.snapshot();
-        if let Some(note) = self
-            .lists
-            .get_mut(self.file_index)
-            .and_then(|list| list.notes.get_mut(self.list_index))
-            .and_then(|notes| notes.get_mut(self.note_index))
-        {
+        if let Some(note) = self.selected_notes().get(self.note_index) {
             let state = match note.state {
                 NoteEnum::Open => NoteEnum::Done,
                 NoteEnum::Done => NoteEnum::Rejected,
                 NoteEnum::Rejected => NoteEnum::Open,
             };
-            note.set_state(state);
+            self.set_note_state(state);
         }
-        self.record_change(before);
-        self.validate_and_update_indices();
     }
 
     pub fn set_note_state(&mut self, state: NoteEnum) {
+        self.set_note_state_on(state, Local::now().date_naive());
+    }
+
+    pub fn set_note_state_on(&mut self, state: NoteEnum, today: NaiveDate) {
         let before = self.snapshot();
-        if let Some(note) = self
-            .lists
-            .get_mut(self.file_index)
-            .and_then(|list| list.notes.get_mut(self.list_index))
-            .and_then(|notes| notes.get_mut(self.note_index))
-        {
-            note.set_state(state);
+        if let Some(list) = self.lists.get_mut(self.file_index) {
+            if let Err(error) = list.set_task_state(self.list_index, self.note_index, state, today)
+            {
+                self.status_message = Some(error);
+                return;
+            }
         }
         self.record_change(before);
         self.validate_and_update_indices();
@@ -1483,6 +1478,25 @@ mod tests {
         app.disk_hashes
             .insert(path, calculate_hash(&contents.as_bytes()));
         app.lists.push(list);
+    }
+
+    #[test]
+    fn recurring_completion_is_one_undoable_change_even_after_save() {
+        let source = "# Home\n- [ ] chore due:2026-10-03 repeat:daily\n";
+        with_app(source, |app, _| {
+            app.cursor_vertical = 2;
+            app.set_note_state_on(
+                crate::todo::NoteEnum::Done,
+                crate::metadata::parse_date("2026-10-03").unwrap(),
+            );
+            assert_eq!(app.lists[0].notes[0].len(), 2);
+            app.save().unwrap();
+            app.undo();
+            app.save().unwrap();
+            assert_eq!(app.lists[0].to_string(), source);
+            app.redo();
+            assert_eq!(app.lists[0].notes[0].len(), 2);
+        });
     }
 
     #[test]

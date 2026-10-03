@@ -69,6 +69,8 @@ yoku list --open --tag work --due overdue --sort due --json
 
 Capture accepts `--tag` multiple times, `--priority`, and `--due`. Listing supports the same filters; its due filter accepts `today`, `overdue`, `none`, or a date. Sorting uses `document`, `priority`, or `due`. JSON also includes tags, priority, due date, and recurrence when present. Sorting and filtering change the view without rewriting Markdown.
 
+Add `repeat:daily`, `repeat:weekly`, `repeat:monthly`, `repeat:yearly`, or an interval such as `repeat:2w` to make a task recurring. Capture also accepts `--repeat weekly`. Completing it retains the completed occurrence and creates the next open occurrence after today, advancing from its scheduled due date (or today when no due date exists). Missed occurrences are skipped. Calendar month/year intervals clamp dates at month ends. Subtasks are completed with the recurring parent and copied open, with their deadlines shifted by the same number of days. Existing matching next occurrences are not duplicated. Undo restores the entire completion and generated occurrence together.
+
 ## Keyboard shortcuts
 
 - Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.

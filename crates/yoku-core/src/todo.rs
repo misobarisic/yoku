@@ -1,3 +1,5 @@
+use crate::metadata::{parse_date, set_field};
+use chrono::NaiveDate;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -84,6 +86,22 @@ pub struct RemovedNote {
 pub struct TaskGroup {
     lines: Vec<SourceLine>,
     base_indent: usize,
+}
+
+impl TaskGroup {
+    fn reindent(&mut self, depth: usize) {
+        for line in &mut self.lines {
+            let columns = indentation(&line.text);
+            if columns >= self.base_indent && !line.text.is_empty() {
+                line.text = format!(
+                    "{}{}",
+                    " ".repeat(columns - self.base_indent + depth),
+                    line.text.trim_start_matches([' ', '\t'])
+                );
+            }
+        }
+        self.base_indent = depth;
+    }
 }
 
 impl FileList {
@@ -364,7 +382,7 @@ impl FileList {
         &mut self,
         section_index: usize,
         note_index: usize,
-        group: TaskGroup,
+        mut group: TaskGroup,
         depth: usize,
     ) -> bool {
         self.reparse();
@@ -377,22 +395,23 @@ impl FileList {
         let insert_at = section.body.iter().position(|block| {
             matches!(block.kind, SourceBlockKind::Note { index, .. } if index == note_index)
         }).unwrap_or_else(|| {
+            if let Some((start, block)) = section.body.iter().enumerate().rev()
+                .find(|(_, block)| matches!(block.kind, SourceBlockKind::Note { .. })) {
+                if let SourceBlockKind::Note { span_lines, .. } = block.kind {
+                    let mut end = (start + span_lines).min(section.body.len());
+                    while end > start + 1 && section.body[end - 1].line.text.trim().is_empty() { end -= 1; }
+                    return end;
+                }
+            }
             let mut end = section.body.len();
             while end > 0 && section.body[end - 1].line.text.trim().is_empty() { end -= 1; }
             end
         });
+        group.reindent(depth);
         let blocks = group
             .lines
             .into_iter()
             .map(|mut line| {
-                let columns = indentation(&line.text);
-                if columns >= group.base_indent && !line.text.is_empty() {
-                    line.text = format!(
-                        "{}{}",
-                        " ".repeat(columns - group.base_indent + depth),
-                        line.text.trim_start_matches([' ', '\t'])
-                    );
-                }
                 line.ending.clone_from(&source.newline);
                 SourceBlock {
                     line,
@@ -472,6 +491,82 @@ impl FileList {
             return false;
         };
         self.insert_task_group(section, index, group, new_depth)
+    }
+
+    pub fn set_task_state(
+        &mut self,
+        section: usize,
+        index: usize,
+        state: NoteEnum,
+        today: NaiveDate,
+    ) -> Result<(), String> {
+        let Some(note) = self.notes.get(section).and_then(|notes| notes.get(index)) else {
+            return Ok(());
+        };
+        let metadata = note.metadata();
+        if state != NoteEnum::Done || note.state == NoteEnum::Done || metadata.recurrence.is_none()
+        {
+            self.notes[section][index].state = state;
+            return Ok(());
+        }
+        let base = metadata.due.unwrap_or(today);
+        let next = metadata
+            .recurrence
+            .and_then(|repeat| repeat.next_due(base, today))
+            .ok_or("The next recurring due date is outside the supported calendar")?;
+        let content = set_field(&note.content, "due", &next.format("%Y-%m-%d").to_string());
+        if self.notes[section]
+            .iter()
+            .any(|note| note.content == content)
+        {
+            self.notes[section][index].state = state;
+            return Ok(());
+        }
+
+        let before = self.clone();
+        let mut copy = self.clone();
+        let mut group = copy
+            .take_task_group(section, index)
+            .ok_or("Could not copy the recurring task")?;
+        let depth = group.base_indent;
+        group.reindent(0);
+        // Parse the copied subtree so examples in code blocks stay untouched.
+        let text = group
+            .lines
+            .iter()
+            .map(|line| format!("{}{}", line.text, line.ending))
+            .collect::<String>();
+        let mut upcoming = parse_markdown(&text);
+        let notes = upcoming
+            .notes
+            .first_mut()
+            .ok_or("Could not parse the recurring task")?;
+        let count = notes.len();
+        let shift = next.signed_duration_since(base);
+        for (child, note) in notes.iter_mut().enumerate() {
+            note.state = NoteEnum::Open;
+            if child == 0 {
+                note.content = content.clone();
+            } else if let Some(due) = note.metadata().due {
+                let due = due
+                    .checked_add_signed(shift)
+                    .ok_or("A recurring subtask date is outside the supported calendar")?;
+                let date = due.format("%Y-%m-%d").to_string();
+                parse_date(&date)?;
+                note.content = set_field(&note.content, "due", &date);
+            }
+        }
+        let group = upcoming
+            .take_task_group(0, 0)
+            .ok_or("Could not copy the next occurrence")?;
+        for note in self.notes[section].iter_mut().skip(index).take(count) {
+            note.state = NoteEnum::Done;
+        }
+        if !self.insert_task_group(section, index + count, group, depth) {
+            *self = before;
+            return Err("Could not insert the next occurrence".into());
+        }
+        Ok(())
     }
 }
 
@@ -1040,6 +1135,90 @@ fn is_raw_markdown(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse_lines, parse_markdown, NoteEnum};
+
+    #[test]
+    fn deeply_nested_tasks_can_repeat_without_losing_indentation() {
+        let mut list = parse_markdown(
+            "# Work\n- [ ] root\n  - [ ] parent\n    + [ ] recurring repeat:daily\n",
+        );
+        list.set_task_state(
+            0,
+            2,
+            NoteEnum::Done,
+            crate::metadata::parse_date("2026-10-03").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.notes[0].len(), 4);
+        assert_eq!(list.note_depth(0, 3), 4);
+        assert_eq!(list.notes[0][3].state, NoteEnum::Open);
+    }
+
+    #[test]
+    fn recurring_completion_copies_subtasks_and_advances_their_dates() {
+        let source = "# Home\r\n- [ ] chore #home due:2026-10-03 repeat:weekly\r\n  * [x] child due:2026-10-02\r\n\r\n> keep\r\n";
+        let mut list = parse_markdown(source);
+        list.set_task_state(
+            0,
+            0,
+            NoteEnum::Done,
+            crate::metadata::parse_date("2026-10-03").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.notes[0].len(), 4);
+        assert_eq!(list.notes[0][0].state, NoteEnum::Done);
+        assert_eq!(list.notes[0][2].state, NoteEnum::Open);
+        assert_eq!(
+            list.notes[0][2].metadata().due,
+            Some(crate::metadata::parse_date("2026-10-10").unwrap())
+        );
+        assert_eq!(list.notes[0][3].state, NoteEnum::Open);
+        assert_eq!(
+            list.notes[0][3].metadata().due,
+            Some(crate::metadata::parse_date("2026-10-09").unwrap())
+        );
+        assert!(list
+            .to_string()
+            .contains("\r\n  * [ ] child due:2026-10-09\r\n\r\n> keep\r\n"));
+        let saved = list.to_string();
+        list.set_task_state(
+            0,
+            0,
+            NoteEnum::Done,
+            crate::metadata::parse_date("2026-10-03").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.to_string(), saved);
+        list.set_task_state(
+            0,
+            0,
+            NoteEnum::Open,
+            crate::metadata::parse_date("2026-10-03").unwrap(),
+        )
+        .unwrap();
+        list.set_task_state(
+            0,
+            0,
+            NoteEnum::Done,
+            crate::metadata::parse_date("2026-10-03").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list.notes[0].len(), 4);
+    }
+
+    #[test]
+    fn recurrence_without_due_uses_today_and_overflow_keeps_the_task_open() {
+        let today = crate::metadata::parse_date("2026-10-03").unwrap();
+        let mut list = parse_markdown("- [ ] Water plants repeat:daily\n");
+        list.set_task_state(0, 0, NoteEnum::Done, today).unwrap();
+        assert_eq!(
+            list.notes[0][1].metadata().due,
+            Some(crate::metadata::parse_date("2026-10-04").unwrap())
+        );
+        let source = "# End\n- [ ] task due:9999-12-31 repeat:daily\n";
+        let mut list = parse_markdown(source);
+        assert!(list.set_task_state(0, 0, NoteEnum::Done, today).is_err());
+        assert_eq!(list.to_string(), source);
+    }
 
     #[test]
     fn recognizes_headerless_nested_and_alternate_markers_without_reformatting() {

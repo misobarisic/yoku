@@ -166,3 +166,19 @@ fn invalid_metadata_options_fail_before_creating_files() {
         assert!(!root.exists());
     }
 }
+
+#[test]
+fn captures_repeat_rules_and_rejects_invalid_intervals() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(!yoku(directory.path(), &["add", "task", "--repeat", "0d"])
+        .status
+        .success());
+    assert!(
+        yoku(directory.path(), &["add", "Chore", "--repeat", "weekly"])
+            .status
+            .success()
+    );
+    let output = yoku(directory.path(), &["list", "--json"]);
+    let tasks: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(tasks[0]["repeat"], "1w");
+}

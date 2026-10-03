@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use yoku_core::metadata::{parse_date, set_field, valid_tag, Priority};
+use yoku_core::metadata::{parse_date, set_field, valid_tag, Priority, Recurrence};
 use yoku_core::query::{sort_tasks, DueFilter, TaskCriteria, TaskFilter, TaskLocation, TaskSort};
 use yoku_core::storage::{valid_file_stem, Workspace};
 use yoku_core::todo::{FileList, Note, NoteEnum};
@@ -36,6 +36,9 @@ pub struct AddArgs {
     /// Set a due date in YYYY-MM-DD format.
     #[arg(long, value_parser = parse_date)]
     pub due: Option<NaiveDate>,
+    /// Repeat on completion: daily, weekly, monthly, yearly, or e.g. 2w.
+    #[arg(long)]
+    pub repeat: Option<Recurrence>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -162,6 +165,9 @@ fn add_task(root: &Path, args: AddArgs) -> io::Result<()> {
     }
     if let Some(due) = args.due {
         text = set_field(&text, "due", &due.format("%Y-%m-%d").to_string());
+    }
+    if let Some(repeat) = args.repeat {
+        text = set_field(&text, "repeat", &repeat.to_string());
     }
     fs::create_dir_all(root)?;
     let mut workspace = Workspace::load(root)?;
