@@ -23,7 +23,7 @@ shell-words = "1"
 
 [package]
 name = "yoku"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "A Markdown based terminal todo app"

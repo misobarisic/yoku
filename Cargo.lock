@@ -2011,7 +2011,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "yoku"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "yoku-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "crossterm",
