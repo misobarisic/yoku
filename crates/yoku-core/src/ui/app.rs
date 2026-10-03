@@ -57,6 +57,11 @@ struct SearchMatch {
     note_index: Option<usize>,
 }
 
+pub struct MovePicker {
+    pub destinations: Vec<(usize, usize)>,
+    pub index: usize,
+}
+
 pub struct App<'a> {
     pub main_path: &'a Path,
     pub files: &'a mut Vec<String>,
@@ -81,6 +86,7 @@ pub struct App<'a> {
     pub show_help: bool,
     pub search_query: String,
     pub quit_after_save: bool,
+    pub move_picker: Option<MovePicker>,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
@@ -125,6 +131,7 @@ impl<'a> App<'a> {
             show_help: false,
             search_query: String::new(),
             quit_after_save: false,
+            move_picker: None,
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
@@ -304,6 +311,118 @@ impl<'a> App<'a> {
             note.set_state(state);
         }
         self.record_change(before);
+    }
+
+    pub fn reorder_selected_task(&mut self, down: bool) {
+        if self.cursor_vertical != 2 {
+            return;
+        }
+        let before = self.snapshot();
+        if let Some(index) = self
+            .lists
+            .get_mut(self.file_index)
+            .and_then(|list| list.reorder_task(self.list_index, self.note_index, down))
+        {
+            self.note_index = index;
+            self.record_change(before);
+            self.validate_and_update_indices();
+        }
+    }
+
+    pub fn indent_selected_task(&mut self, outdent: bool) {
+        if self.cursor_vertical != 2 {
+            return;
+        }
+        let before = self.snapshot();
+        if self
+            .lists
+            .get_mut(self.file_index)
+            .is_some_and(|list| list.indent_task(self.list_index, self.note_index, outdent))
+        {
+            self.record_change(before);
+            self.validate_and_update_indices();
+        } else {
+            self.status_message =
+                Some("No suitable parent task for this indentation change".into());
+        }
+    }
+
+    pub fn begin_move(&mut self) {
+        if self.cursor_vertical != 2 || self.selected_notes().get(self.note_index).is_none() {
+            return;
+        }
+        let destinations = self
+            .lists
+            .iter()
+            .enumerate()
+            .flat_map(|(file, list)| (0..list.titles.len()).map(move |section| (file, section)))
+            .filter(|destination| *destination != (self.file_index, self.list_index))
+            .collect::<Vec<_>>();
+        if destinations.is_empty() {
+            self.status_message = Some("Create another list or file to move this task into".into());
+        } else {
+            self.move_picker = Some(MovePicker {
+                destinations,
+                index: 0,
+            });
+        }
+    }
+
+    pub fn select_move_destination(&mut self, down: bool) {
+        if let Some(picker) = &mut self.move_picker {
+            picker.index = if down {
+                (picker.index + 1).min(picker.destinations.len() - 1)
+            } else {
+                picker.index.saturating_sub(1)
+            };
+        }
+    }
+
+    pub fn confirm_move(&mut self) {
+        if let Some(picker) = self.move_picker.take() {
+            if let Some(&(file, section)) = picker.destinations.get(picker.index) {
+                self.move_task_to(file, section);
+            }
+        }
+    }
+
+    pub fn move_task_to(&mut self, file: usize, section: usize) -> bool {
+        if self.cursor_vertical != 2
+            || (file, section) == (self.file_index, self.list_index)
+            || self
+                .lists
+                .get(file)
+                .is_none_or(|list| section >= list.titles.len())
+        {
+            return false;
+        }
+        let before = self.snapshot();
+        let source_file = self.file_index;
+        let source_section = self.list_index;
+        let section_count = self.lists[source_file].titles.len();
+        let Some(group) = self.lists[source_file].take_task_group(source_section, self.note_index)
+        else {
+            return false;
+        };
+        let removed_sections = section_count - self.lists[source_file].titles.len();
+        let section = if file == source_file && section > source_section {
+            section - removed_sections
+        } else {
+            section
+        };
+        let note = self.lists[file].notes[section].len();
+        if !self.lists[file].insert_task_group(section, note, group, 0) {
+            self.restore_snapshot(before);
+            return false;
+        }
+        self.file_index = file;
+        self.list_index = section;
+        self.note_index = note;
+        self.record_change(before);
+        self.validate_and_update_indices();
+        self.status_message =
+            Some("Moved the task and its subtasks; Ctrl+Z undoes the move".into());
+        true
     }
 
     pub fn save(&mut self) -> io::Result<bool> {
@@ -1157,6 +1276,91 @@ mod tests {
             disk_hashes,
             Vec::new(),
         )
+    }
+
+    fn with_app(contents: &str, check: impl FnOnce(&mut App<'_>, &std::path::Path)) {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), contents);
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+        check(&mut app, directory.path());
+    }
+
+    fn add_test_file(app: &mut App<'_>, root: &std::path::Path, name: &str, contents: &str) {
+        let path = root.join(format!("{name}.md"));
+        fs::write(&path, contents).unwrap();
+        let list = parse_markdown(contents);
+        app.files.push(name.into());
+        app.paths.push(path.clone());
+        app.hashes.insert(path.clone(), calculate_hash(&list));
+        app.disk_hashes
+            .insert(path, calculate_hash(&contents.as_bytes()));
+        app.lists.push(list);
+    }
+
+    #[test]
+    fn moving_tasks_between_files_is_atomic_and_undoable() {
+        let source = "# Work\n* [X] parent\n  + [ ] child\n\n> keep\n";
+        let destination = "## Inbox\n- [ ] existing\n";
+        with_app(source, |app, root| {
+            add_test_file(app, root, "personal", destination);
+            app.cursor_vertical = 2;
+            assert!(!app.move_task_to(1, 42));
+            assert_eq!(app.lists[0].to_string(), source);
+            assert!(app.move_task_to(1, 0));
+            assert!(app.file_is_dirty(0) && app.file_is_dirty(1));
+            assert_eq!(app.lists[1].notes[0].len(), 3);
+            assert_eq!(app.note_index, 1);
+            app.save().unwrap();
+            app.undo();
+            app.save().unwrap();
+            assert_eq!(fs::read_to_string(root.join("todos.md")).unwrap(), source);
+            assert_eq!(
+                fs::read_to_string(root.join("personal.md")).unwrap(),
+                destination
+            );
+            app.redo();
+            assert_eq!(app.lists[1].notes[0].len(), 3);
+        });
+    }
+
+    #[test]
+    fn moving_the_last_headerless_task_keeps_the_destination_index_valid() {
+        with_app("- [ ] task\n\n## Other\n", |app, _| {
+            app.cursor_vertical = 2;
+            app.begin_move();
+            assert_eq!(app.move_picker.as_ref().unwrap().destinations, [(0, 1)]);
+            app.confirm_move();
+            assert_eq!(app.lists[0].titles, ["Other"]);
+            assert_eq!(app.lists[0].notes[0][0].content, "task");
+            app.undo();
+            assert_eq!(app.lists[0].titles, ["Inbox", "Other"]);
+        });
+    }
+
+    #[test]
+    fn task_order_and_indentation_changes_have_undo_history() {
+        let original = "# Work\n- [ ] a\n- [ ] b\n";
+        with_app(original, |app, _| {
+            app.cursor_vertical = 2;
+            app.reorder_selected_task(true);
+            assert_eq!(app.note_index, 1);
+            app.undo();
+            assert_eq!(app.lists[0].to_string(), original);
+            app.note_index = 1;
+            app.indent_selected_task(false);
+            assert_eq!(app.lists[0].note_depth(0, 1), 2);
+            app.undo();
+            assert_eq!(app.lists[0].to_string(), original);
+        });
     }
 
     #[test]

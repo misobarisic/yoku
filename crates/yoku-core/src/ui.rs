@@ -56,6 +56,17 @@ where
             continue;
         }
 
+        if app.move_picker.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => app.select_move_destination(false),
+                KeyCode::Down | KeyCode::Char('j') => app.select_move_destination(true),
+                KeyCode::Enter => app.confirm_move(),
+                KeyCode::Esc => app.move_picker = None,
+                _ => {}
+            }
+            continue;
+        }
+
         if let Some(conflict) = app.save_conflict.clone() {
             match key.code {
                 KeyCode::Char('o') => {
@@ -116,6 +127,11 @@ where
                 KeyCode::Char('u') => app.create_file(),
                 KeyCode::Char('i') => app.create_list(),
                 KeyCode::Char('r') => app.remove(),
+                KeyCode::Char('m') => app.begin_move(),
+                KeyCode::Char('J') => app.reorder_selected_task(true),
+                KeyCode::Char('K') => app.reorder_selected_task(false),
+                KeyCode::Tab => app.indent_selected_task(false),
+                KeyCode::BackTab => app.indent_selected_task(true),
                 KeyCode::Char('e') => {
                     if key.modifiers == KeyModifiers::CONTROL {
                         app.change_description();
@@ -217,6 +233,10 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     }
     if app.show_help {
         render_help(frame, area);
+        return;
+    }
+    if app.move_picker.is_some() {
+        render_move_picker(frame, area, app);
         return;
     }
 
@@ -527,7 +547,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(help)
@@ -536,6 +556,32 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
             .style(Style::default().fg(Color::White)),
         rect,
     );
+}
+
+fn render_move_picker(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
+    let Some(picker) = &app.move_picker else {
+        return;
+    };
+    let items = picker
+        .destinations
+        .iter()
+        .map(|&(file, section)| {
+            ListItem::new(format!(
+                "{} / {}",
+                app.files[file], app.lists[file].titles[section]
+            ))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Move task: Enter selects, Esc cancels"),
+        )
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    let mut state = ListState::default().with_selected(Some(picker.index));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 pub fn make_tab_items(values: &[String]) -> Vec<Line<'static>> {

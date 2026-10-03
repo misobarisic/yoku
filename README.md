@@ -53,6 +53,7 @@ Lists can use headings from `#` through `######`. Checklists without a heading a
 - Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.
 - Press `Enter`, `Space`, `x`, `+`, or `-` to change the selected task state.
 - Press `e` to edit the selected file name, list title, or task. Press `Ctrl+E` to edit a list description.
+- Press `J`/`K` to move a task down/up among its siblings, `m` to pick another list or file, and `Tab`/`Shift+Tab` to indent/outdent it. Subtasks and continuation Markdown move with their parent.
 - Press `u` to create a file, `i` to create a list, and `o` to create a task.
 - Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` undoes edits (including deletions, creations, renames, and task states); `Ctrl+Y` redoes them. The last 100 edits remain undoable after saving. Reloading external changes clears the history.
 - Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
