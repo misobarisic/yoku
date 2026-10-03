@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, remove_file};
 use std::io;
 use std::path::{Path, PathBuf};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub const EMPTY_LIST: &FileList = &FileList::empty_const();
 pub const EMPTY_NOTE_VEC: &Vec<Note> = &vec![];
@@ -53,6 +55,7 @@ pub struct App<'a> {
     pub notes_state: ListState,
     pub mode: EditorMode,
     pub input: String,
+    pub input_cursor: usize,
     pub status_message: Option<String>,
     pub save_conflict: Option<SaveConflict>,
     to_remove: &'a mut Vec<PathBuf>,
@@ -87,6 +90,7 @@ impl<'a> App<'a> {
             notes_state: Default::default(),
             mode: EditorMode::Nothing,
             input: String::new(),
+            input_cursor: 0,
             status_message: None,
             save_conflict: None,
             renamed_from: HashMap::new(),
@@ -455,7 +459,7 @@ impl<'a> App<'a> {
         self.mode = match self.cursor_vertical {
             0 => match self.files.get(self.file_index) {
                 Some(name) => {
-                    self.input = name.clone();
+                    self.set_input(name.clone());
                     EditorMode::ChangeFileName
                 }
                 None => EditorMode::Nothing,
@@ -466,7 +470,7 @@ impl<'a> App<'a> {
                 .and_then(|list| list.titles.get(self.list_index))
             {
                 Some(title) => {
-                    self.input = title.clone();
+                    self.set_input(title.clone());
                     EditorMode::ChangeListName
                 }
                 None => EditorMode::Nothing,
@@ -478,7 +482,7 @@ impl<'a> App<'a> {
                 .and_then(|notes| notes.get(self.note_index))
             {
                 Some(note) => {
-                    self.input = note.content.clone();
+                    self.set_input(note.content.clone());
                     EditorMode::ChangeNoteContent
                 }
                 None => EditorMode::Nothing,
@@ -493,7 +497,7 @@ impl<'a> App<'a> {
             .get(self.file_index)
             .and_then(|list| list.descriptions.get(self.list_index))
         {
-            self.input = description.clone();
+            self.set_input(description.clone());
             self.mode = EditorMode::ChangeListDescription;
         }
     }
@@ -528,17 +532,69 @@ impl<'a> App<'a> {
 
     pub fn create_file(&mut self) {
         self.mode = EditorMode::CreateFile;
-        self.input.clear();
+        self.set_input(String::new());
     }
 
     pub fn create_list(&mut self) {
         self.mode = EditorMode::CreateList;
-        self.input.clear();
+        self.set_input(String::new());
     }
 
     pub fn create_note(&mut self) {
         self.mode = EditorMode::CreateNote;
-        self.input.clear();
+        self.set_input(String::new());
+    }
+
+    pub fn insert_input_char(&mut self, character: char) {
+        let byte_index = grapheme_boundary(&self.input, self.input_cursor);
+        self.input.insert(byte_index, character);
+        self.input_cursor = grapheme_index_at_byte(&self.input, byte_index + character.len_utf8());
+    }
+
+    pub fn move_input_left(&mut self) {
+        self.input_cursor = self.input_cursor.saturating_sub(1);
+    }
+
+    pub fn move_input_right(&mut self) {
+        self.input_cursor = (self.input_cursor + 1).min(self.input.graphemes(true).count());
+    }
+
+    pub fn move_input_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn move_input_end(&mut self) {
+        self.input_cursor = self.input.graphemes(true).count();
+    }
+
+    pub fn backspace_input(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let start = grapheme_boundary(&self.input, self.input_cursor - 1);
+        let end = grapheme_boundary(&self.input, self.input_cursor);
+        self.input.replace_range(start..end, "");
+        self.input_cursor -= 1;
+    }
+
+    pub fn delete_input(&mut self) {
+        let count = self.input.graphemes(true).count();
+        if self.input_cursor >= count {
+            return;
+        }
+        let start = grapheme_boundary(&self.input, self.input_cursor);
+        let end = grapheme_boundary(&self.input, self.input_cursor + 1);
+        self.input.replace_range(start..end, "");
+    }
+
+    pub fn input_cursor_display_width(&self) -> usize {
+        let byte_index = grapheme_boundary(&self.input, self.input_cursor);
+        UnicodeWidthStr::width(&self.input[..byte_index])
+    }
+
+    fn set_input(&mut self, input: String) {
+        self.input = input;
+        self.move_input_end();
     }
 
     pub fn handle_enter(&mut self) {
@@ -667,8 +723,23 @@ impl<'a> App<'a> {
 
     fn finish_input(&mut self) {
         self.input.clear();
+        self.input_cursor = 0;
         self.mode = EditorMode::Nothing;
     }
+}
+
+fn grapheme_boundary(input: &str, grapheme_index: usize) -> usize {
+    input
+        .grapheme_indices(true)
+        .nth(grapheme_index)
+        .map_or(input.len(), |(byte_index, _)| byte_index)
+}
+
+fn grapheme_index_at_byte(input: &str, byte_index: usize) -> usize {
+    input
+        .grapheme_indices(true)
+        .take_while(|(start, _)| *start < byte_index)
+        .count()
 }
 
 fn valid_file_stem(name: &str) -> bool {
@@ -819,5 +890,36 @@ mod tests {
         app.overwrite_conflict();
         assert!(app.save().unwrap());
         assert!(fs::read_to_string(target).unwrap().contains("# Local"));
+    }
+
+    #[test]
+    fn input_editing_uses_graphemes_and_keeps_cursor_on_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        let mut paths = Vec::new();
+        let mut lists = Vec::new();
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.set_input("A👩‍💻e\u{301}Z".to_owned());
+        app.move_input_left();
+        app.backspace_input();
+        assert_eq!(app.input, "A👩‍💻Z");
+        app.insert_input_char('界');
+        assert_eq!(app.input, "A👩‍💻界Z");
+        app.move_input_home();
+        app.delete_input();
+        assert_eq!(app.input, "👩‍💻界Z");
+        assert_eq!(app.input_cursor_display_width(), 0);
     }
 }

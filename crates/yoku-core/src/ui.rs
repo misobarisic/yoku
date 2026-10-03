@@ -96,16 +96,30 @@ where
             },
             _ => match key.code {
                 KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
-                KeyCode::Char('q') => app.input.push('q'),
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => return Ok(()),
-                KeyCode::Char(character) => app.input.push(character),
-                KeyCode::Backspace => {
-                    app.input.pop();
+                KeyCode::Char('a') if key.modifiers == KeyModifiers::CONTROL => {
+                    app.move_input_home()
                 }
+                KeyCode::Char('e') if key.modifiers == KeyModifiers::CONTROL => {
+                    app.move_input_end()
+                }
+                KeyCode::Left => app.move_input_left(),
+                KeyCode::Right => app.move_input_right(),
+                KeyCode::Home => app.move_input_home(),
+                KeyCode::End => app.move_input_end(),
+                KeyCode::Backspace => app.backspace_input(),
+                KeyCode::Delete => app.delete_input(),
                 KeyCode::Enter => app.handle_enter(),
                 KeyCode::Esc => {
                     app.mode = EditorMode::Nothing;
                     app.input.clear();
+                    app.input_cursor = 0;
+                }
+                KeyCode::Char(character)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    app.insert_input_char(character)
                 }
                 _ => {}
             },
@@ -210,7 +224,11 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
     frame.render_stateful_widget(note_list, chunks[2], &mut app.notes_state);
 
     if app.mode != EditorMode::Nothing {
+        let input_width = chunks[3].width.saturating_sub(2) as usize;
+        let cursor_cell = app.input_cursor_display_width();
+        let horizontal_scroll = cursor_cell.saturating_sub(input_width.saturating_sub(1));
         let input = Paragraph::new(app.input.as_str())
+            .scroll((horizontal_scroll.min(u16::MAX as usize) as u16, 0))
             .style(Style::default().fg(Color::White))
             .block(
                 Block::default()
@@ -228,6 +246,15 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                     .style(Style::default().fg(Color::LightCyan)),
             );
         frame.render_widget(input, chunks[3]);
+        if chunks[3].width >= 2 && chunks[3].height >= 2 {
+            let cursor_x = chunks[3].x.saturating_add(1).saturating_add(
+                cursor_cell
+                    .saturating_sub(horizontal_scroll)
+                    .min(input_width) as u16,
+            );
+            let cursor_y = chunks[3].y.saturating_add(1);
+            frame.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 
     if area.height > 0 {
