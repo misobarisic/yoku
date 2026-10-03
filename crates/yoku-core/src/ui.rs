@@ -1,7 +1,7 @@
 pub mod app;
 
 use crate::todo::NoteEnum;
-use crate::ui::app::{App, EditorMode, SaveConflictKind, EMPTY_LIST, EMPTY_NOTE_VEC};
+use crate::ui::app::{App, EditorMode, EMPTY_LIST, EMPTY_NOTE_VEC};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     backend::Backend,
@@ -68,9 +68,7 @@ where
                         }
                     }
                 }
-                KeyCode::Char('r')
-                    if conflict.kind != crate::ui::app::SaveConflictKind::DestinationExists =>
-                {
+                KeyCode::Char('r') => {
                     if let Err(error) = app.reload_conflict() {
                         app.save_conflict = Some(conflict);
                         app.status_message = Some(format!("Could not reload file: {error}"));
@@ -394,12 +392,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
         })
         .or_else(|| {
             app.save_conflict.as_ref().map(|conflict| {
-                let action = if conflict.kind == SaveConflictKind::DestinationExists {
-                    "o overwrite, Esc cancel"
-                } else {
-                    "r reload, o overwrite, Esc cancel"
-                };
-                format!("Save conflict at {}. {action}", conflict.path.display())
+                format!(
+                    "Save conflict at {}. r reload, o overwrite, Esc cancel",
+                    conflict.path.display()
+                )
             })
         })
         .or_else(|| app.status_message.clone())

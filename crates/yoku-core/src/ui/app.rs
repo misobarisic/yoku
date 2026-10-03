@@ -1311,6 +1311,43 @@ mod tests {
     }
 
     #[test]
+    fn destination_collision_can_reload_the_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("new.md");
+        let external = "# Existing\n- [ ] keep\n";
+        fs::write(&target, external).unwrap();
+        let mut files = vec!["new".into()];
+        let mut paths = vec![target.clone()];
+        let mut lists = vec![FileList::from_parts(
+            vec!["Local".into()],
+            vec![String::new()],
+            vec![Vec::new()],
+        )];
+        let mut hashes = HashMap::new();
+        let mut disk_hashes = HashMap::new();
+        let mut removed = Vec::new();
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        assert!(!app.save().unwrap());
+        assert_eq!(
+            app.save_conflict.as_ref().unwrap().kind,
+            SaveConflictKind::DestinationExists
+        );
+        app.reload_conflict().unwrap();
+        assert_eq!(app.lists[0].titles[0], "Existing");
+        assert!(app.save().unwrap());
+        assert_eq!(fs::read_to_string(target).unwrap(), external);
+    }
+
+    #[test]
     fn input_editing_uses_graphemes_and_keeps_cursor_on_boundaries() {
         let directory = tempfile::tempdir().unwrap();
         let mut files = Vec::new();
