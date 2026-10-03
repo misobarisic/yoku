@@ -60,6 +60,15 @@ yoku --main-path ./todos add "Local project task"
 
 Capture defaults to `inbox.md` and an Inbox heading, creating them as needed. Listing supports `--file` and `--list` and does not create files. JSON includes each task's file, list, index within the list, state, text, and indentation depth. New files created in the TUI start with an empty Inbox.
 
+Metadata stays in task text, for example `- [ ] Review changes #work priority:high due:2026-10-03`. Tags can contain letters, numbers, `-`, `_`, and `/`; priorities are `high`, `normal` (the default), or `low`. Dates use `YYYY-MM-DD`. Invalid tokens remain ordinary text, and tokens inside code spans are excluded from metadata.
+
+```sh
+yoku add "Review changes" --tag work --priority high --due 2026-10-03
+yoku list --open --tag work --due overdue --sort due --json
+```
+
+Capture accepts `--tag` multiple times, `--priority`, and `--due`. Listing supports the same filters; its due filter accepts `today`, `overdue`, `none`, or a date. Sorting uses `document`, `priority`, or `due`. JSON also includes tags, priority, due date, and recurrence when present. Sorting and filtering change the view without rewriting Markdown.
+
 ## Keyboard shortcuts
 
 - Move between files and lists with the arrow keys, WASD, or HJKL. Move through tasks with Up/Down.
@@ -70,6 +79,7 @@ Capture defaults to `inbox.md` and an Inbox heading, creating them as needed. Li
 - Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` undoes edits (including deletions, creations, renames, and task states); `Ctrl+Y` redoes them. The last 100 edits remain undoable after saving. Reloading external changes clears the history.
 - Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
 - Press `f` to cycle All/Open/Done/Rejected tasks and `g` to toggle a task view across every file. Tabs show done/total progress, and the task panel shows state counts. Search returns to the matching list with all states visible.
+- Press `F` to combine filters such as `tag:work priority:high due:today` and ordinary search words; submit an empty filter to clear it. Press `S` to cycle document/priority/due sorting, `t` for open tasks due Today, and `v` for open Overdue tasks across all files. Relative dates use your local calendar. Overdue tasks appear red and high-priority tasks yellow. `J`/`K` switch back to document order when reordering tasks.
 - Press `?` or `F1` for the in-app help.
 - Press `Ctrl+S` to save and keep working; changed files have a `*` beside their name. Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
 - In an editor, use Left/Right, Home/End, Backspace, and Delete to move and edit text. Cursor movement treats accented letters and emoji as whole graphemes.

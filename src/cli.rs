@@ -1,9 +1,11 @@
+use chrono::{Local, NaiveDate};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use yoku_core::query::TaskFilter;
+use yoku_core::metadata::{parse_date, set_field, valid_tag, Priority};
+use yoku_core::query::{sort_tasks, DueFilter, TaskCriteria, TaskFilter, TaskLocation, TaskSort};
 use yoku_core::storage::{valid_file_stem, Workspace};
 use yoku_core::todo::{FileList, Note, NoteEnum};
 
@@ -25,6 +27,15 @@ pub struct AddArgs {
     /// List heading; created if it does not exist.
     #[arg(short, long, default_value = "Inbox")]
     pub list: String,
+    /// Add a tag; repeat this option for multiple tags.
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Set the priority (high, normal, low).
+    #[arg(long)]
+    pub priority: Option<Priority>,
+    /// Set a due date in YYYY-MM-DD format.
+    #[arg(long, value_parser = parse_date)]
+    pub due: Option<NaiveDate>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -40,6 +51,22 @@ impl State {
             Self::Open => TaskFilter::Open,
             Self::Done => TaskFilter::Done,
             Self::Rejected => TaskFilter::Rejected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Sort {
+    Document,
+    Priority,
+    Due,
+}
+impl Sort {
+    fn order(self) -> TaskSort {
+        match self {
+            Self::Document => TaskSort::Document,
+            Self::Priority => TaskSort::Priority,
+            Self::Due => TaskSort::Due,
         }
     }
 }
@@ -61,6 +88,18 @@ pub struct ListArgs {
     /// Emit a JSON array, including file, list, task index, and state.
     #[arg(long)]
     pub json: bool,
+    /// Require a tag; repeat this option to require several tags.
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Filter by priority.
+    #[arg(long)]
+    pub priority: Option<Priority>,
+    /// Filter by today, overdue, none, or YYYY-MM-DD.
+    #[arg(long)]
+    pub due: Option<DueFilter>,
+    /// Sort the view without rewriting Markdown.
+    #[arg(long, value_enum, default_value = "document")]
+    pub sort: Sort,
 }
 
 #[derive(Serialize)]
@@ -71,6 +110,10 @@ struct TaskRecord<'a> {
     state: &'static str,
     text: &'a str,
     depth: usize,
+    tags: Vec<String>,
+    priority: &'static str,
+    due: Option<String>,
+    repeat: Option<String>,
 }
 
 pub fn run(command: Command, root: &Path) -> io::Result<()> {
@@ -100,6 +143,26 @@ fn add_task(root: &Path, args: AddArgs) -> io::Result<()> {
             "Use a valid file name and non-empty, single-line task and list text",
         ));
     }
+    let mut text = args.text;
+    for tag in args.tags {
+        let tag = tag.trim_start_matches('#');
+        if !valid_tag(tag) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid tag"));
+        }
+        if !yoku_core::metadata::TaskMetadata::parse(&text)
+            .tags
+            .iter()
+            .any(|existing| existing.to_lowercase() == tag.to_lowercase())
+        {
+            text.push_str(&format!(" #{tag}"));
+        }
+    }
+    if let Some(priority) = args.priority {
+        text = set_field(&text, "priority", priority.label());
+    }
+    if let Some(due) = args.due {
+        text = set_field(&text, "due", &due.format("%Y-%m-%d").to_string());
+    }
     fs::create_dir_all(root)?;
     let mut workspace = Workspace::load(root)?;
     let file_index = if let Some(index) = workspace.files.iter().position(|name| name == file) {
@@ -122,7 +185,7 @@ fn add_task(root: &Path, args: AddArgs) -> io::Result<()> {
     list.push_note(
         section,
         Note {
-            content: args.text,
+            content: text,
             state: NoteEnum::Open,
         },
     );
@@ -141,7 +204,21 @@ fn list_tasks(root: &Path, args: ListArgs, output: &mut impl Write) -> io::Resul
     } else {
         args.state.map_or(TaskFilter::All, State::filter)
     };
-    let mut records = Vec::new();
+    let criteria = TaskCriteria {
+        tags: args
+            .tags
+            .iter()
+            .map(|tag| tag.trim_start_matches('#').to_owned())
+            .collect(),
+        priority: args.priority,
+        due: args.due,
+        text: Vec::new(),
+    };
+    if criteria.tags.iter().any(|tag| !valid_tag(tag)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid tag"));
+    }
+    let today = Local::now().date_naive();
+    let mut locations = Vec::new();
     for (file, list) in workspace.lists.iter().enumerate() {
         if args
             .file
@@ -159,24 +236,42 @@ fn list_tasks(root: &Path, args: ListArgs, output: &mut impl Write) -> io::Resul
                 continue;
             }
             for (index, note) in notes.iter().enumerate() {
-                if !filter.accepts(note.state) {
+                if !filter.accepts(note.state) || !criteria.accepts(note, today) {
                     continue;
                 }
-                records.push(TaskRecord {
-                    file: &workspace.files[file],
-                    list: &list.titles[section],
-                    index,
-                    state: match note.state {
-                        NoteEnum::Open => "open",
-                        NoteEnum::Done => "done",
-                        NoteEnum::Rejected => "rejected",
-                    },
-                    text: &note.content,
-                    depth: list.note_depth(section, index),
+                locations.push(TaskLocation {
+                    file,
+                    section,
+                    note: index,
                 });
             }
         }
     }
+    sort_tasks(&mut locations, &workspace.lists, args.sort.order());
+    let records = locations
+        .iter()
+        .map(|location| {
+            let list = &workspace.lists[location.file];
+            let note = &list.notes[location.section][location.note];
+            let metadata = note.metadata();
+            TaskRecord {
+                file: &workspace.files[location.file],
+                list: &list.titles[location.section],
+                index: location.note,
+                state: match note.state {
+                    NoteEnum::Open => "open",
+                    NoteEnum::Done => "done",
+                    NoteEnum::Rejected => "rejected",
+                },
+                text: &note.content,
+                depth: list.note_depth(location.section, location.note),
+                tags: metadata.tags,
+                priority: metadata.priority.label(),
+                due: metadata.due.map(|date| date.format("%Y-%m-%d").to_string()),
+                repeat: metadata.recurrence.map(|rule| rule.to_string()),
+            }
+        })
+        .collect::<Vec<_>>();
     if args.json {
         serde_json::to_writer_pretty(&mut *output, &records)?;
         writeln!(output)?;

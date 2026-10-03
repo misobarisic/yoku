@@ -123,6 +123,10 @@ where
                 KeyCode::Char('/') => app.begin_search(),
                 KeyCode::Char('f') => app.cycle_task_filter(),
                 KeyCode::Char('g') => app.toggle_global_view(),
+                KeyCode::Char('F') => app.begin_filter(),
+                KeyCode::Char('S') => app.cycle_task_sort(),
+                KeyCode::Char('t') => app.show_agenda(false),
+                KeyCode::Char('v') => app.show_agenda(true),
                 KeyCode::Char('?') | KeyCode::F(1) => app.show_help = true,
                 KeyCode::Char('n') => app.search_next(true),
                 KeyCode::Char('N') => app.search_next(false),
@@ -380,7 +384,23 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                     " ".repeat(list.note_depth(location.section, location.note).min(40))
                 )),
                 Span::styled(context, Style::default().fg(Color::Cyan)),
-                Span::raw(note.content.as_str()),
+                Span::styled(
+                    note.content.as_str(),
+                    Style::default().fg({
+                        let metadata = note.metadata();
+                        if note.state == NoteEnum::Open
+                            && metadata
+                                .due
+                                .is_some_and(|due| due < chrono::Local::now().date_naive())
+                        {
+                            Color::Red
+                        } else if metadata.priority == crate::metadata::Priority::High {
+                            Color::Yellow
+                        } else {
+                            Color::White
+                        }
+                    }),
+                ),
             ]))
             .style(Style::default().fg(Color::White))
         })
@@ -400,17 +420,23 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
         )
     };
     let task_title = format!(
-        "{} | {} | {} open, {} done, {} rejected",
+        "{} | {} | {} | {} open, {} done, {} rejected",
         if app.task_view == TaskView::Lists && !description.is_empty() {
             description
         } else {
             app.task_view.label()
         },
         app.task_filter.label(),
+        app.task_sort.label(),
         counts.open,
         counts.done,
         counts.rejected
     );
+    let task_title = if app.filter_query.is_empty() {
+        task_title
+    } else {
+        format!("{task_title} | {}", app.filter_query)
+    };
     let note_list = List::new(if tasks.is_empty() {
         vec![ListItem::new("No tasks match this view")]
     } else {
@@ -447,6 +473,7 @@ pub fn ui(frame: &mut Frame<'_>, app: &mut App<'_>) {
                         EditorMode::ChangeListDescription => "Change List Description",
                         EditorMode::ChangeNoteContent => "Change Note Content",
                         EditorMode::Search => "Search",
+                        EditorMode::Filter => "Filter",
                         EditorMode::Nothing => "",
                     })
                     .style(Style::default().fg(Color::LightCyan)),
@@ -547,6 +574,7 @@ fn render_compact(frame: &mut Frame<'_>, area: Rect, app: &App<'_>) {
             EditorMode::ChangeListDescription => "Description",
             EditorMode::ChangeNoteContent => "Task",
             EditorMode::Search => "Search",
+            EditorMode::Filter => "Filter",
             EditorMode::Nothing => "Input",
         };
         let prefix = format!("{label}: ");
@@ -597,7 +625,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     );
-    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  f cycles All/Open/Done/Rejected; g toggles tasks across all files.\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
+    let help = "Navigation\n  Arrows or h/j/k/l or WASD move between files, lists, and tasks.\n\nEditing\n  e edit the selected item; Ctrl+E edits a list description.\n  u create a file, i create a list, o create a task.\n  J/K reorder tasks, m moves to a list/file, Tab/Shift+Tab indent/outdent.\n  Enter/Space toggles a task. r deletes; Ctrl+Z undoes edits; Ctrl+Y redoes them. History survives saves and clears on reload.\n\nSearch and save\n  f cycles states; g toggles all files; F filters tags/text/metadata.\n  S sorts by document/priority/due; t shows Today, v shows Overdue.\n  / searches names, list titles, descriptions, and tasks. n/N moves through matches.\n  Ctrl+S saves without quitting; * marks changed files. q saves and quits. Ctrl+Q or Ctrl+C asks before discarding changes.\n  F1 or ? opens this help. Esc closes help or cancels an editor.";
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(help)

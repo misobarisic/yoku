@@ -1,3 +1,4 @@
+pub mod metadata;
 pub mod query;
 pub mod storage;
 pub mod todo;

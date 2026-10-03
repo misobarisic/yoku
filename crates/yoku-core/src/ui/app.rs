@@ -1,7 +1,10 @@
-use crate::query::{TaskCounts, TaskFilter, TaskLocation, TaskView};
+use crate::query::{
+    sort_tasks, DueFilter, TaskCounts, TaskCriteria, TaskFilter, TaskLocation, TaskSort, TaskView,
+};
 use crate::storage::valid_file_stem;
 use crate::todo::{parse_markdown, FileList, Note, NoteEnum};
 use crate::util::calculate_hash;
+use chrono::{Local, NaiveDate};
 use ratatui::widgets::ListState;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, remove_file};
@@ -24,6 +27,7 @@ pub enum EditorMode {
     ChangeListDescription,
     ChangeNoteContent,
     Search,
+    Filter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +92,9 @@ pub struct App<'a> {
     pub move_picker: Option<MovePicker>,
     pub task_filter: TaskFilter,
     pub task_view: TaskView,
+    pub task_sort: TaskSort,
+    pub criteria: TaskCriteria,
+    pub filter_query: String,
     to_remove: &'a mut Vec<PathBuf>,
     renamed_from: HashMap<PathBuf, PathBuf>,
     overwrite_paths: HashSet<PathBuf>,
@@ -135,6 +142,9 @@ impl<'a> App<'a> {
             move_picker: None,
             task_filter: TaskFilter::All,
             task_view: TaskView::Lists,
+            task_sort: TaskSort::Document,
+            criteria: TaskCriteria::default(),
+            filter_query: String::new(),
             renamed_from: HashMap::new(),
             overwrite_paths: HashSet::new(),
             undo_stack: Vec::new(),
@@ -163,6 +173,10 @@ impl<'a> App<'a> {
     }
 
     pub fn visible_tasks(&self) -> Vec<TaskLocation> {
+        self.visible_tasks_on(Local::now().date_naive())
+    }
+
+    pub fn visible_tasks_on(&self, today: NaiveDate) -> Vec<TaskLocation> {
         let mut tasks = Vec::new();
         for (file, list) in self.lists.iter().enumerate() {
             for (section, notes) in list.notes.iter().enumerate() {
@@ -172,7 +186,21 @@ impl<'a> App<'a> {
                     continue;
                 }
                 for (note, task) in notes.iter().enumerate() {
-                    if self.task_filter.accepts(task.state) {
+                    let agenda_matches = match self.task_view {
+                        TaskView::Today => {
+                            task.state == NoteEnum::Open
+                                && DueFilter::Today.accepts(task.metadata().due, today)
+                        }
+                        TaskView::Overdue => {
+                            task.state == NoteEnum::Open
+                                && DueFilter::Overdue.accepts(task.metadata().due, today)
+                        }
+                        _ => true,
+                    };
+                    if agenda_matches
+                        && self.task_filter.accepts(task.state)
+                        && self.criteria.accepts(task, today)
+                    {
                         tasks.push(TaskLocation {
                             file,
                             section,
@@ -182,6 +210,7 @@ impl<'a> App<'a> {
                 }
             }
         }
+        sort_tasks(&mut tasks, self.lists, self.task_sort);
         tasks
     }
 
@@ -213,6 +242,49 @@ impl<'a> App<'a> {
         }
         self.validate_and_update_indices();
         self.status_message = None;
+    }
+
+    pub fn show_agenda(&mut self, overdue: bool) {
+        self.task_view = if overdue {
+            TaskView::Overdue
+        } else {
+            TaskView::Today
+        };
+        self.task_filter = TaskFilter::Open;
+        self.task_sort = TaskSort::Due;
+        if let Some(task) = self.visible_tasks().first().copied() {
+            self.select_task(task);
+        }
+        self.validate_and_update_indices();
+        self.status_message = None;
+    }
+
+    pub fn cycle_task_sort(&mut self) {
+        self.task_sort = self.task_sort.cycle();
+        self.status_message = Some(format!(
+            "Sorted by {}; S changes sorting",
+            self.task_sort.label()
+        ));
+    }
+
+    pub fn begin_filter(&mut self) {
+        self.mode = EditorMode::Filter;
+        self.set_input(self.filter_query.clone());
+        self.status_message =
+            Some("Filter: tag:work priority:high due:today (empty clears)".into());
+    }
+
+    fn complete_filter(&mut self) {
+        match TaskCriteria::parse(&self.input) {
+            Ok(criteria) => {
+                self.criteria = criteria;
+                self.filter_query = self.input.clone();
+                self.finish_input();
+                self.validate_and_update_indices();
+                self.status_message = None;
+            }
+            Err(error) => self.status_message = Some(error),
+        }
     }
 
     pub fn file_counts(&self, file: usize) -> TaskCounts {
@@ -436,6 +508,7 @@ impl<'a> App<'a> {
             .and_then(|list| list.reorder_task(self.list_index, self.note_index, down))
         {
             self.note_index = index;
+            self.task_sort = TaskSort::Document;
             self.record_change(before);
             self.validate_and_update_indices();
         }
@@ -938,7 +1011,9 @@ impl<'a> App<'a> {
     }
 
     pub fn has_unsaved_changes(&self) -> bool {
-        (self.mode != EditorMode::Nothing && self.mode != EditorMode::Search)
+        (self.mode != EditorMode::Nothing
+            && self.mode != EditorMode::Search
+            && self.mode != EditorMode::Filter)
             || self.pending_file_delete.is_some()
             || !self.to_remove.is_empty()
             || self
@@ -1081,6 +1156,8 @@ impl<'a> App<'a> {
         };
         self.task_filter = TaskFilter::All;
         self.task_view = TaskView::Lists;
+        self.criteria = TaskCriteria::default();
+        self.filter_query.clear();
         self.file_index = found.file_index;
         if let Some(section_index) = found.section_index {
             self.list_index = section_index;
@@ -1220,6 +1297,9 @@ impl<'a> App<'a> {
                         );
                         self.note_index = current_list.notes[self.list_index].len() - 1;
                         self.task_filter = TaskFilter::All;
+                        self.task_view = TaskView::Lists;
+                        self.criteria = TaskCriteria::default();
+                        self.filter_query.clear();
                         self.cursor_vertical = 2;
                         self.finish_input();
                     }
@@ -1298,6 +1378,7 @@ impl<'a> App<'a> {
                 }
             }
             EditorMode::Search => self.complete_search(),
+            EditorMode::Filter => self.complete_filter(),
             EditorMode::Nothing => {}
         }
         self.record_change(before);
@@ -1402,6 +1483,41 @@ mod tests {
         app.disk_hashes
             .insert(path, calculate_hash(&contents.as_bytes()));
         app.lists.push(list);
+    }
+
+    #[test]
+    fn metadata_filters_and_agendas_select_matching_tasks_across_files() {
+        let today = crate::metadata::parse_date("2026-10-03").unwrap();
+        with_app("# Work\n- [ ] urgent #work due:2026-10-02 priority:high\n- [x] finished #work due:2026-10-03\n- [ ] no deadline #work\n", |app, root| {
+            add_test_file(app, root, "personal", "## Inbox\n- [ ] today #home due:2026-10-03\n- [ ] later #work due:2026-10-05 priority:low\n");
+            app.task_view = crate::query::TaskView::Today;
+            assert_eq!(app.visible_tasks_on(today), [crate::query::TaskLocation { file: 1, section: 0, note: 0 }]);
+            app.task_view = crate::query::TaskView::Overdue;
+            assert_eq!(app.visible_tasks_on(today).len(), 1);
+            app.task_view = crate::query::TaskView::AllTasks;
+            app.criteria = crate::query::TaskCriteria::parse("tag:WORK priority:high urgent").unwrap();
+            assert_eq!(app.visible_tasks_on(today), [crate::query::TaskLocation { file: 0, section: 0, note: 0 }]);
+            app.begin_filter();
+            app.set_input("due:invalid".into());
+            app.handle_enter();
+            assert_eq!(app.mode, super::EditorMode::Filter);
+            assert_eq!(app.criteria.tags, ["work"]);
+        });
+    }
+
+    #[test]
+    fn sorting_changes_the_view_without_rewriting_task_order() {
+        let original = "# Work\n- [ ] low priority:low\n- [ ] later due:2026-10-05\n- [ ] urgent due:2026-10-02 priority:high\n";
+        with_app(original, |app, _| {
+            app.task_sort = crate::query::TaskSort::Priority;
+            assert_eq!(app.visible_tasks()[0].note, 2);
+            assert_eq!(app.visible_tasks()[2].note, 0);
+            app.task_sort = crate::query::TaskSort::Due;
+            assert_eq!(app.visible_tasks()[0].note, 2);
+            assert_eq!(app.visible_tasks()[1].note, 1);
+            assert_eq!(app.lists[0].to_string(), original);
+            assert!(!app.has_unsaved_changes());
+        });
     }
 
     #[test]

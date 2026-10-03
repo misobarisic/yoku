@@ -695,6 +695,9 @@ pub struct Note {
 }
 
 impl Note {
+    pub fn metadata(&self) -> crate::metadata::TaskMetadata {
+        crate::metadata::TaskMetadata::parse(&self.content)
+    }
     pub fn set_content(&mut self, content: String) -> &mut Self {
         self.content = content;
         self

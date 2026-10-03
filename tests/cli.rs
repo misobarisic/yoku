@@ -90,3 +90,79 @@ fn listing_missing_data_is_read_only_and_json_escapes_text() {
     let tasks: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(tasks[0]["text"], text);
 }
+
+#[test]
+fn capture_and_listing_share_metadata_filters_and_sorting() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(yoku(
+        directory.path(),
+        &[
+            "add",
+            "Later",
+            "--tag",
+            "work",
+            "--priority",
+            "low",
+            "--due",
+            "2026-10-05"
+        ]
+    )
+    .status
+    .success());
+    assert!(yoku(
+        directory.path(),
+        &[
+            "add",
+            "Urgent",
+            "--tag",
+            "Work",
+            "--priority",
+            "high",
+            "--due",
+            "2026-10-02"
+        ]
+    )
+    .status
+    .success());
+    let output = yoku(
+        directory.path(),
+        &["list", "--tag", "work", "--sort", "due", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tasks: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 2);
+    assert_eq!(tasks[0]["due"], "2026-10-02");
+    assert_eq!(tasks[0]["priority"], "high");
+    assert_eq!(tasks[0]["tags"][0], "Work");
+    let output = yoku(
+        directory.path(),
+        &[
+            "list",
+            "--priority",
+            "high",
+            "--due",
+            "2026-10-02",
+            "--json",
+        ],
+    );
+    let tasks: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn invalid_metadata_options_fail_before_creating_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("missing");
+    for args in [
+        ["add", "task", "--due", "2026-02-30"],
+        ["add", "task", "--priority", "urgent"],
+        ["add", "task", "--tag", "bad tag"],
+    ] {
+        assert!(!yoku(&root, &args).status.success());
+        assert!(!root.exists());
+    }
+}
