@@ -1,18 +1,20 @@
-name: Continuous Deployment
+name: Release
 
 on:
   push:
     tags:
       - "v*.*.*"
 
+permissions:
+  contents: write
+
 jobs:
   publish:
-    name: Publishing for ${{ matrix.os }}
+    name: Release for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-        rust: [stable]
         include:
           - os: macos-latest
             artifact_prefix: macos
@@ -28,50 +30,34 @@ jobs:
             binary_postfix: ".exe"
 
     steps:
-      - name: Installing Rust toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v7
         with:
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - name: Installing needed macOS dependencies
-        if: matrix.os == 'macos-latest'
-        run: brew install openssl@1.1
-      - name: Installing needed Ubuntu dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y -qq pkg-config libssl-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-      - name: Checking out sources
-        uses: actions/checkout@v1
-      - name: Running cargo build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          toolchain: ${{ matrix.rust }}
-          args: --release --target ${{ matrix.target }}
-
-      - name: Packaging final binary
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package binary and checksum
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
+          cd "target/${{ matrix.target }}/release"
 
-          BINARY_NAME=yoku${{ matrix.binary_postfix }}
-          strip $BINARY_NAME
-
-          RELEASE_NAME=yoku-${{ matrix.artifact_prefix }}
-          tar czvf $RELEASE_NAME.tar.gz $BINARY_NAME
-
-          if [[ ${{ runner.os }} == 'Windows' ]]; then
-            certutil -hashfile $RELEASE_NAME.tar.gz sha256 | grep -E [A-Fa-f0-9]{64} > $RELEASE_NAME.sha256
-          else
-            shasum -a 256 $RELEASE_NAME.tar.gz > $RELEASE_NAME.sha256
+          binary_name="yoku${{ matrix.binary_postfix }}"
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            strip "$binary_name"
           fi
-      - name: Releasing assets
-        uses: softprops/action-gh-release@v1
+
+          release_name="yoku-${{ matrix.artifact_prefix }}"
+          tar -czf "$release_name.tar.gz" "$binary_name"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            checksum=$(certutil -hashfile "$release_name.tar.gz" SHA256 | sed -n '2p' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            printf '%s  %s\n' "$checksum" "$release_name.tar.gz" > "$release_name.sha256"
+          else
+            shasum -a 256 "$release_name.tar.gz" > "$release_name.sha256"
+          fi
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             target/${{ matrix.target }}/release/yoku-${{ matrix.artifact_prefix }}.tar.gz
             target/${{ matrix.target }}/release/yoku-${{ matrix.artifact_prefix }}.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

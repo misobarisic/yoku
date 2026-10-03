@@ -6,7 +6,7 @@
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/misobarisic/yoku)](https://github.com/misobarisic/yoku/releases/latest)
 ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/misobarisic/yoku)
 
-yoku is a markdown based todo app allowing for easy portability
+yoku is a Markdown based todo app allowing for easy portability.
 
 ---
 
@@ -18,11 +18,13 @@ Binary releases are available [here](https://github.com/misobarisic/yoku/release
 
 ### Build from source (latest)
 
-Requires `rust` and `cargo` to be installed:
+Requires Rust 1.88 or newer and Cargo:
 
 1. Clone the repository with `git clone https://github.com/misobarisic/yoku.git` and cd into it
-2. Run `cargo build --release`
+2. Run `cargo build --locked --release`
 3. Move the binary to your place of choice `mv target/release/yoku $destination`
+
+You can also install it directly from the checkout with `cargo install --path . --locked`.
 
 ### Arch Linux
 
@@ -42,7 +44,7 @@ Please make sure to update tests as appropriate.
 
 ## Data
 
-Default data location depends on the platform you're using. You can check it by passing the `-d/--data-path` flag such as `yoku -d`.
+The default data directory depends on your platform. Print it with `yoku --data-path`, or choose a different directory with `yoku --path ./todos`. Yoku reads Markdown (`.md`) files from that directory.
 
 ---
 
