@@ -492,6 +492,8 @@ impl<'a> App<'a> {
                 "the conflicting file is no longer part of the pending save",
             ));
         }
+        self.undo_stack.clear();
+        self.status_message = Some("Reloaded from disk; deletion undo history was cleared".into());
         Ok(())
     }
 
@@ -974,9 +976,16 @@ impl<'a> App<'a> {
                     {
                         self.to_remove.retain(|removed| removed != &new_path);
                         if new_path != current_path {
-                            self.to_remove.push(current_path);
-                            self.renamed_from
-                                .insert(new_path.clone(), self.paths[self.file_index].clone());
+                            if !self.to_remove.contains(&current_path) {
+                                self.to_remove.push(current_path.clone());
+                            }
+                            let original_path = self
+                                .renamed_from
+                                .remove(&current_path)
+                                .unwrap_or_else(|| current_path.clone());
+                            if new_path != original_path {
+                                self.renamed_from.insert(new_path.clone(), original_path);
+                            }
                             if let Some(path) = self.paths.get_mut(self.file_index) {
                                 *path = new_path;
                             }
@@ -1228,6 +1237,41 @@ mod tests {
         app.undo_last_delete();
         assert_eq!(app.paths.len(), 1);
         assert!(app.save().unwrap());
+    }
+
+    #[test]
+    fn chained_renames_keep_the_original_file_when_reloading_a_collision() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut files, mut paths, mut lists, mut hashes, mut disk_hashes, mut removed) =
+            app_data(directory.path(), "# Work\n- [ ] task\n");
+        let original = paths[0].clone();
+        let target = directory.path().join("target.md");
+        let mut app = App::new(
+            &mut files,
+            &mut paths,
+            &mut lists,
+            &mut hashes,
+            &mut disk_hashes,
+            directory.path(),
+            &mut removed,
+        );
+
+        app.change();
+        app.set_input("middle".into());
+        app.handle_enter();
+        app.change();
+        app.set_input("target".into());
+        app.handle_enter();
+        assert_eq!(app.renamed_from.get(&target), Some(&original));
+        fs::write(&target, "# Existing target\n").unwrap();
+
+        assert!(!app.save().unwrap());
+        app.reload_conflict().unwrap();
+        assert!(app.paths.contains(&original));
+        assert!(original.exists());
+        assert!(app.save().unwrap());
+        assert!(original.exists());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "# Existing target\n");
     }
 
     #[test]

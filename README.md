@@ -52,7 +52,7 @@ The default data directory depends on your platform. Print it with `yoku --data-
 - Press `Enter`, `Space`, `x`, `+`, or `-` to change the selected task state.
 - Press `e` to edit the selected file name, list title, or task. Press `Ctrl+E` to edit a list description.
 - Press `u` to create a file, `i` to create a list, and `o` to create a task.
-- Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` restores the last deletion until the next successful save.
+- Press `r` to delete the selected task or list. Deleting a file asks for confirmation. `Ctrl+Z` restores the last deletion until the next successful save or a conflict reload.
 - Press `/` to search file names, list titles, descriptions, and task text. Search ignores case; `n` and `N` move to the next and previous matches.
 - Press `?` or `F1` for the in-app help.
 - Press `q` to save and quit. If saving fails, the app stays open with your edits available for retry. `Ctrl+Q` or `Ctrl+C` asks before discarding unsaved changes.
